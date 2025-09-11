@@ -4,7 +4,7 @@ import json
 import os
 import re
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 import numpy as np
 import soundfile as sf
@@ -174,27 +174,11 @@ def _process_row(i: int, row: dict, name: str, audio_dir: Path,
     return items or None
 
 
-def _process_chunk(chunk: list[tuple[int, dict]], name: str, audio_dir: Path,
-                   lang_regex: re.Pattern | None,
-                   min_dur: float, max_dur: float,
-                   pause_sec: float, vad_mode: int):
-    """Process a list of dataset rows in a single worker."""
-    all_items = []
-    for i, row in chunk:
-        items = _process_row(i, row, name, audio_dir,
-                             lang_regex, min_dur, max_dur,
-                             pause_sec, vad_mode)
-        if items:
-            all_items.extend(items)
-    return all_items
-
-
 def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
                               lang_regex: re.Pattern | None, hf_token: str | None,
                               cache_dir: Path | None = None, num_workers: int = 10,
                               min_dur: float = MIN_DUR, max_dur: float = MAX_DUR,
-                              pause_sec: float = PAUSE_SEC, vad_mode: int = VAD_MODE,
-                              chunk_size: int = 100):
+                              pause_sec: float = PAUSE_SEC, vad_mode: int = VAD_MODE):
     """Download HF dataset split and store as 16k mono wav + manifest."""
 
     name = f"{repo.replace('/', '___')}_{split}"
@@ -229,43 +213,34 @@ def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
     if getattr(ds, "info", None) and ds.info.splits and split in ds.info.splits:
         total = ds.info.splits[split].num_examples
 
-    with manifest.open("w", encoding="utf-8") as fo, ProcessPoolExecutor(max_workers=num_workers) as ex:
+    with manifest.open("w", encoding="utf-8") as fo, ThreadPoolExecutor(max_workers=num_workers) as ex:
         pbar = tqdm(total=total, desc=f"{repo}:{split}")
-        futures: list[tuple] = []
-        chunk: list[tuple[int, dict]] = []
+        pending = set()
         idx = 0
         for row in ds:
-            chunk.append((idx, row))
+            pending.add(ex.submit(_process_row, idx, row, name, audio_dir,
+                                  lang_regex, min_dur, max_dur,
+                                  pause_sec, vad_mode))
             idx += 1
-            if len(chunk) >= chunk_size:
-                futures.append((ex.submit(_process_chunk, chunk, name, audio_dir,
-                                           lang_regex, min_dur, max_dur,
-                                           pause_sec, vad_mode), len(chunk)))
-                chunk = []
+            if len(pending) >= num_workers:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    items = fut.result()
+                    if items:
+                        for item in items:
+                            fo.write(json.dumps(item, ensure_ascii=False) + "\n")
+                            kept += 1
+                pbar.update(len(done))
 
-            while len(futures) >= num_workers:
-                fut = next(as_completed([f for f, _ in futures]))
-                size = next(sz for f, sz in futures if f is fut)
-                futures = [(f, sz) for f, sz in futures if f is not fut]
+        if pending:
+            done, _ = wait(pending)
+            for fut in done:
                 items = fut.result()
                 if items:
                     for item in items:
                         fo.write(json.dumps(item, ensure_ascii=False) + "\n")
                         kept += 1
-                pbar.update(size)
-
-        if chunk:
-            futures.append((ex.submit(_process_chunk, chunk, name, audio_dir,
-                                       lang_regex, min_dur, max_dur,
-                                       pause_sec, vad_mode), len(chunk)))
-
-        for fut, size in futures:
-            items = fut.result()
-            if items:
-                for item in items:
-                    fo.write(json.dumps(item, ensure_ascii=False) + "\n")
-                    kept += 1
-            pbar.update(size)
+            pbar.update(len(done))
 
     print(f"[OK] {name}: {kept} records")
     return {"name": name, "manifest": str(manifest), "dir": str(out_dir), "kept": kept}
@@ -293,9 +268,6 @@ def main():
                         help="Aggressiveness of webrtcvad (0-3)")
     parser.add_argument("--pause-sec", type=float, default=PAUSE_SEC,
                         help="Minimum pause length for splitting")
-    parser.add_argument("--chunk-size", type=int, default=100,
-                        help="Number of dataset rows processed per batch")
-
     args = parser.parse_args()
 
     regex = re.compile(args.lang_regex, re.IGNORECASE) if args.lang_regex else None
@@ -303,8 +275,7 @@ def main():
     prepare_hf_dataset_to_wav(args.repo, args.split, Path(args.out), regex,
                               args.hf_token, cache_dir, args.workers,
                               args.min_dur, args.max_dur,
-                              args.pause_sec, args.vad_mode,
-                              args.chunk_size)
+                              args.pause_sec, args.vad_mode)
 
 
 if __name__ == "__main__":
