@@ -48,9 +48,9 @@ Example:
 python canary_inference.py --dataset-dir data_wav --out-dir predictions
 ```
 
-The model location is hardcoded in the script. To use a different
-Hugging Face cache or `.nemo` file, edit the `MODEL_PATH` constant in
-`canary_inference.py`.
+The model cache is expected under `.hf/models--nvidia--canary-1b-v2`
+relative to the script. To use a different Hugging Face cache or `.nemo`
+file, edit the `MODEL_PATH` constant in `canary_inference.py`.
 
 Use `--help` to see all available options. The script loads the Canary model and
 writes predictions vs reference text for each audio file.

@@ -14,8 +14,8 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only
 # Base directory of the script, used for resolving relative paths
 BASE_DIR = Path(__file__).resolve().parent
 
-# Hardcoded location of the Canary model files
-MODEL_PATH = Path("Z:/Users/GOW_PHD/lmstudio/models/Zapis_rolok/Finetuning_analysis/Ru_dataset_prep/STT_dataset_preparation_Ru/.hf/models--nvidia--canary-1b-v2")
+# Hardcoded relative location of the Canary model files
+MODEL_PATH = BASE_DIR / ".hf" / "models--nvidia--canary-1b-v2"
 
 
 def resolve_path(p: Path) -> Path:
