@@ -22,13 +22,13 @@ def resolve_path(p: Path) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Canary inference on a dataset")
-    parser.add_argument("--dataset-dir", type=Path, default=Path("data_wav"),
+    parser.add_argument("--dataset-dir", type=Path, default=Path("data_wav\\bond005___podlodka_speech_train"),
                         help="Directory containing manifest.jsonl")
-    parser.add_argument("--out-dir", type=Path, default=Path("predictions"),
+    parser.add_argument("--out-dir", type=Path, default=Path("predictions\\bond005___podlodka_speech_train"),
                         help="Directory to save predictions")
     parser.add_argument("--model-id", default="nvidia/canary-1b-v2",
                         help="HuggingFace model identifier")
-    parser.add_argument("--nemo-path", type=str, default=None,
+    parser.add_argument("--nemo-path", type=str, default=Path(".hf\\models--nvidia--canary-1b-v2"),
                         help="Path to a local .nemo model file")
     parser.add_argument("--source-lang", default="ru",
                         help="Source language for inference")
