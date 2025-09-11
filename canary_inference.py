@@ -14,6 +14,9 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers only
 # Base directory of the script, used for resolving relative paths
 BASE_DIR = Path(__file__).resolve().parent
 
+# Hardcoded location of the Canary model files
+MODEL_PATH = Path("Z:/Users/GOW_PHD/lmstudio/models/Zapis_rolok/Finetuning_analysis/Ru_dataset_prep/STT_dataset_preparation_Ru/.hf/models--nvidia--canary-1b-v2")
+
 
 def resolve_path(p: Path) -> Path:
     """Resolve a path relative to the script directory if it is not absolute."""
@@ -28,8 +31,6 @@ def parse_args() -> argparse.Namespace:
                         help="Directory to save predictions")
     parser.add_argument("--model-id", default="nvidia/canary-1b-v2",
                         help="HuggingFace model identifier")
-    parser.add_argument("--nemo-path", type=str, default=Path(".hf\\models--nvidia--canary-1b-v2"),
-                        help="Path to a local .nemo model file")
     parser.add_argument("--source-lang", default="ru",
                         help="Source language for inference")
     parser.add_argument("--target-lang", default="ru",
@@ -46,11 +47,32 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def load_canary(model_id: str, nemo_path: str | None):
+def load_canary(model_id: str, model_path: Path = MODEL_PATH):
+    """Load a Canary model from various sources.
+
+    If ``model_path`` points to a ``.nemo`` file, the model is restored from it.
+    If ``model_path`` is a directory, the function first looks for a ``.nemo``
+    file inside (useful for a Hugging Face cache) and falls back to using the
+    directory as ``cache_dir`` for :func:`ASRModel.from_pretrained`.
+    Otherwise the model is downloaded from Hugging Face using ``model_id``.
+    """
+
     from nemo.collections.asr.models import ASRModel
 
-    if nemo_path:
-        return ASRModel.restore_from(nemo_path).eval()
+    model_path = Path(model_path)
+    if model_path.is_file():
+        return ASRModel.restore_from(str(model_path)).eval()
+    if model_path.is_dir():
+        model_name = model_id.split("/")[-1]
+        nemo_files = list(model_path.rglob(f"*{model_name}*.nemo")) or list(
+            model_path.rglob("*.nemo")
+        )
+        if nemo_files:
+            return ASRModel.restore_from(str(nemo_files[0])).eval()
+        return ASRModel.from_pretrained(
+            model_name=model_id, cache_dir=str(model_path)
+        ).eval()
+
     return ASRModel.from_pretrained(model_name=model_id).eval()
 
 
@@ -84,7 +106,7 @@ def main() -> None:
     manifest = args.dataset_dir / "manifest.jsonl"
     items = [json.loads(x) for x in manifest.open("r", encoding="utf-8")]
     uniq_paths = list({it["audio_filepath"] for it in items})
-    model = load_canary(args.model_id, args.nemo_path)
+    model = load_canary(args.model_id)
     preds = transcribe_paths(model, uniq_paths, args.batch_size,
                              args.source_lang, args.target_lang,
                              args.task, args.pnc)
