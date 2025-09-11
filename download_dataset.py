@@ -10,6 +10,17 @@ import soundfile as sf
 from datasets import load_dataset, Audio
 from tqdm import tqdm
 
+# ----- Настройки скачивания -----
+# Укажите здесь ссылку на набор данных Hugging Face (например "nvidia/voice")
+HF_DATASET_REPO = ""
+
+# Укажите здесь ваш токен доступа Hugging Face или оставьте пустым, если он не требуется
+HF_TOKEN = ""
+
+# Укажите каталог кэша, куда будут скачаны данные Hugging Face
+HF_CACHE_DIR = "hf_cache"
+# --------------------------------
+
 MIN_DUR = 1.0
 MAX_DUR = 35.0
 
@@ -35,11 +46,21 @@ def save_wav(path: Path, data: np.ndarray, sr: int):
     sf.write(str(path), data, sr, subtype="PCM_16", format="WAV")
 
 def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
-                              lang_regex: re.Pattern | None, hf_token: str | None):
+                              lang_regex: re.Pattern | None, hf_token: str | None,
+                              cache_dir: Path | None = None):
     """Download HF dataset split and store as 16k mono wav + manifest."""
+    name = f"{repo.replace('/', '___')}_{split}"
+    out_dir = out_root / name
+    manifest = out_dir / "manifest.jsonl"
+    if manifest.exists():
+        print(f"[skip] {name}: already exists")
+        return {"name": name, "manifest": str(manifest), "dir": str(out_dir), "kept": 0}
+
     kwargs = {}
     if hf_token:
         kwargs["token"] = hf_token
+    if cache_dir:
+        kwargs["cache_dir"] = str(cache_dir)
     try:
         ds = load_dataset(repo, split=split, streaming=False, **kwargs)
     except Exception as exc:  # pragma: no cover - network path
@@ -51,11 +72,8 @@ def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
     except Exception:
         pass
 
-    name = f"{repo.replace('/', '___')}_{split}"
-    out_dir = out_root / name
     audio_dir = out_dir / "audio"
     out_dir.mkdir(parents=True, exist_ok=True)
-    manifest = out_dir / "manifest.jsonl"
 
     kept = 0
     with manifest.open("w", encoding="utf-8") as fo:
@@ -100,15 +118,22 @@ def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
 
 def main():
     parser = argparse.ArgumentParser(description="Download HF dataset split to wav + manifest")
-    parser.add_argument("repo", help="HF dataset repo, e.g. nvidia/voice")
+    parser.add_argument("repo", nargs="?", default=HF_DATASET_REPO,
+                    help="HF dataset repo, e.g. nvidia/voice")
     parser.add_argument("--split", default="train")
     parser.add_argument("--out", default="data_wav", help="Output directory")
-    parser.add_argument("--hf-token", dest="hf_token", default=os.environ.get("HF_TOKEN"))
+    parser.add_argument("--hf-token", dest="hf_token",
+                    default=HF_TOKEN or os.environ.get("HF_TOKEN"),
+                    help="HF access token")
     parser.add_argument("--lang-regex", dest="lang_regex", default="(^|[-_])ru([-_]|$)|russian")
+    parser.add_argument("--cache-dir", dest="cache_dir", default=HF_CACHE_DIR,
+                        help="HF datasets cache directory")
     args = parser.parse_args()
 
     regex = re.compile(args.lang_regex, re.IGNORECASE) if args.lang_regex else None
-    prepare_hf_dataset_to_wav(args.repo, args.split, Path(args.out), regex, args.hf_token)
+    cache_dir = Path(args.cache_dir) if args.cache_dir else None
+    prepare_hf_dataset_to_wav(args.repo, args.split, Path(args.out), regex,
+                              args.hf_token, cache_dir)
 
 if __name__ == "__main__":
     main()
