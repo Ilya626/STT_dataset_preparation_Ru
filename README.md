@@ -62,7 +62,8 @@ contain a `preds.jsonl` file with model outputs. For every dataset folder the
 script writes analysis results to `analysis_output/<dataset_name>/`.
 
 ```
-python dataset_analysis.py --preds-dir predictions --out-dir analysis_output
+python dataset_analysis.py --preds-dir predictions --out-dir analysis_output \
+    --semantic-weight 2.0 --wer-weight 1.0
 ```
 
 For each dataset the script computes WER, SER and semantic similarity for each
@@ -81,6 +82,7 @@ distribution plots. The Pareto front and dominated examples are saved as
 `pareto_front.jsonl` and `beyond_pareto.jsonl` respectively. Use `--help` to see
 all options, including the `--tail-fraction` parameter that controls outlier
 trimming.
+
 
 When confidence values are present, aggregated statistics (mean, median, 5‑th
 and 95‑th percentiles) are written to `confidence_stats.json` to provide a quick

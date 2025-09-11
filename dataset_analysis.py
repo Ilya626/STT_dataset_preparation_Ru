@@ -49,6 +49,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="If set, skip predictions with confidence below this value",
     )
+    parser.add_argument(
+        "--semantic-weight",
+        type=float,
+        default=2.0,
+        help="Weight for semantic similarity contribution to difficulty",
+    )
+    parser.add_argument(
+        "--wer-weight",
+        type=float,
+        default=1.0,
+        help="Weight for WER contribution to difficulty",
+    )
     args = parser.parse_args()
     args.preds_dir = resolve_path(args.preds_dir)
     args.out_dir = resolve_path(args.out_dir)
@@ -137,10 +149,12 @@ def analyse_dataset(
 
     difficulty_scores = []
     for row, swer, sim, sf in zip(rows, sample_wers, semantic_sims, ser_flags):
+
         difficulty = (
             DIFFICULTY_WER_WEIGHT * swer
             + DIFFICULTY_SEM_WEIGHT * (1.0 - float(sim))
         )
+
         row.update(
             {
                 "wer": swer,
@@ -187,6 +201,7 @@ def analyse_dataset(
     else:
         dominated = []
 
+
     out_dir.mkdir(parents=True, exist_ok=True)
 
     wers = np.array(sample_wers)
@@ -194,6 +209,7 @@ def analyse_dataset(
     q_low_d = np.quantile(diffs, tail_fraction)
     q_high_d = np.quantile(diffs, 1 - tail_fraction)
     filtered = [r for r in rows if q_low_d <= r["difficulty"] <= q_high_d]
+
     filtered.sort(key=lambda r: r["difficulty"])
     cut = int(len(filtered) * 0.3)
     easy = filtered[:cut]
@@ -290,6 +306,7 @@ def main() -> None:
             out_dir,
             args.tail_fraction,
             args.confidence_threshold,
+
         )
 
 
