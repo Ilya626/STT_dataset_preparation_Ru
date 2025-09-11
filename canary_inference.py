@@ -81,11 +81,22 @@ def transcribe_paths(model: ASRModel, paths: List[str], batch_size: int,
     results = {}
     batch_size = max(1, int(batch_size))
     import torch, gc
+    from nemo.collections.asr.models.config import TranscribeConfig
+
+    cfg = TranscribeConfig(batch_size=batch_size, num_workers=4)
+    # Adjust num_workers based on available hardware resources if needed
+    cfg.pretokenize = False
+
     for i in range(0, len(paths), batch_size):
         batch = paths[i:i + batch_size]
-        hyps = model.transcribe(batch, batch_size=batch_size,
-                                source_lang=source_lang, target_lang=target_lang,
-                                task=task, pnc=pnc)
+        hyps = model.transcribe(
+            batch,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            task=task,
+            pnc=pnc,
+            override_config=cfg,
+        )
         for p, h in zip(batch, hyps):
             if isinstance(h, str):
                 results[p] = h
