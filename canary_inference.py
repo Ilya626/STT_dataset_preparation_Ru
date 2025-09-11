@@ -7,16 +7,20 @@ from nemo.collections.asr.models import ASRModel
 from tqdm import tqdm
 
 
+# Batch settings
+BATCH_SIZE = 16
+
+
 def load_canary(model_id: str, nemo_path: str | None):
     if nemo_path:
         return ASRModel.restore_from(nemo_path).eval()
     return ASRModel.from_pretrained(model_name=model_id).eval()
 
 
-def transcribe_paths(model: ASRModel, paths: List[str], batch_size: int,
+def transcribe_paths(model: ASRModel, paths: List[str],
                      source_lang: str, target_lang: str, task: str, pnc: bool):
     results = {}
-    batch_size = max(1, int(batch_size))
+    batch_size = max(1, int(BATCH_SIZE))
     import torch, gc
     for i in range(0, len(paths), batch_size):
         batch = paths[i:i + batch_size]
@@ -44,7 +48,6 @@ def main():
     parser.add_argument("--out", default="predictions.jsonl")
     parser.add_argument("--model-id", default="nvidia/canary-1b-v2")
     parser.add_argument("--nemo-path", default=None)
-    parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--source-lang", default="ru")
     parser.add_argument("--target-lang", default="ru")
     parser.add_argument("--task", default="asr")
@@ -54,7 +57,7 @@ def main():
     items = [json.loads(x) for x in Path(args.manifest).open("r", encoding="utf-8")]
     uniq_paths = list({it["audio_filepath"] for it in items})
     model = load_canary(args.model_id, args.nemo_path)
-    preds = transcribe_paths(model, uniq_paths, args.batch_size,
+    preds = transcribe_paths(model, uniq_paths,
                              args.source_lang, args.target_lang, args.task, args.pnc)
 
     with Path(args.out).open("w", encoding="utf-8") as f:
