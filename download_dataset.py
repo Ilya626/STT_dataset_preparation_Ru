@@ -4,7 +4,7 @@ import json
 import os
 import re
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import soundfile as sf
@@ -163,6 +163,21 @@ def _process_row(i: int, row: dict, name: str, audio_dir: Path,
     return items or None
 
 
+def _process_chunk(chunk: list[tuple[int, dict]], name: str, audio_dir: Path,
+                   lang_regex: re.Pattern | None,
+                   min_dur: float, max_dur: float,
+                   pause_sec: float, vad_mode: int):
+    """Process a list of dataset rows in a single worker."""
+    all_items = []
+    for i, row in chunk:
+        items = _process_row(i, row, name, audio_dir,
+                             lang_regex, min_dur, max_dur,
+                             pause_sec, vad_mode)
+        if items:
+            all_items.extend(items)
+    return all_items
+
+
 def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
                               lang_regex: re.Pattern | None, hf_token: str | None,
                               cache_dir: Path | None = None, num_workers: int = 10,
@@ -198,27 +213,27 @@ def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
 
     kept = 0
 
+    total = len(ds)
+    chunk_size = (total + num_workers - 1) // num_workers
+    chunks = []
+    for start in range(0, total, chunk_size):
+        end = min(start + chunk_size, total)
+        chunk = [(i, ds[i]) for i in range(start, end)]
+        chunks.append(chunk)
+
     with manifest.open("w", encoding="utf-8") as fo, ProcessPoolExecutor(max_workers=num_workers) as ex:
-        futures = set()
-        for i, row in enumerate(tqdm(ds, desc=f"{repo}:{split}")):
-            futures.add(ex.submit(_process_row, i, row, name, audio_dir,
-                                  lang_regex, min_dur, max_dur,
-                                  pause_sec, vad_mode))
-            if len(futures) >= num_workers * 5:
-                done, futures = wait(futures, return_when=FIRST_COMPLETED)
-                for fut in done:
-                    items = fut.result()
-                    if items:
-                        for item in items:
-                            fo.write(json.dumps(item, ensure_ascii=False) + "\n")
-                            kept += 1
-        done, _ = wait(futures)
-        for fut in done:
-            items = fut.result()
-            if items:
-                for item in items:
-                    fo.write(json.dumps(item, ensure_ascii=False) + "\n")
-                    kept += 1
+        futures = {ex.submit(_process_chunk, chunk, name, audio_dir,
+                             lang_regex, min_dur, max_dur,
+                             pause_sec, vad_mode): len(chunk)
+                   for chunk in chunks}
+        with tqdm(total=total, desc=f"{repo}:{split}") as pbar:
+            for fut in as_completed(futures):
+                items = fut.result()
+                if items:
+                    for item in items:
+                        fo.write(json.dumps(item, ensure_ascii=False) + "\n")
+                        kept += 1
+                pbar.update(futures[fut])
 
     print(f"[OK] {name}: {kept} records")
     return {"name": name, "manifest": str(manifest), "dir": str(out_dir), "kept": kept}
