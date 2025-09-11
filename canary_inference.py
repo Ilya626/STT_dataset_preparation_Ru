@@ -76,6 +76,44 @@ def load_canary(model_id: str, model_path: Path = MODEL_PATH):
     return ASRModel.from_pretrained(model_name=model_id).eval()
 
 
+def _safe_len(tokens) -> int:
+    """Return a safe length for ``tokens`` which may be tensors or sequences."""
+    if tokens is None:
+        return 0
+    try:  # pragma: no cover - optional torch dependency
+        import torch
+
+        if torch.is_tensor(tokens):
+            return tokens.numel()
+    except Exception:  # pragma: no cover - torch not installed
+        pass
+    try:
+        return len(tokens)
+    except Exception:  # pragma: no cover - objects without length
+        return 0
+
+
+def _mean_logprob(token_logprobs):
+    """Compute the mean of log probabilities if possible."""
+    if token_logprobs is None:
+        return None
+    try:  # pragma: no cover - optional torch dependency
+        import torch
+
+        if torch.is_tensor(token_logprobs):
+            if token_logprobs.numel() == 0:
+                return None
+            return float(token_logprobs.mean().item())
+    except Exception:  # pragma: no cover - torch not installed
+        pass
+    try:
+        if len(token_logprobs) == 0:
+            return None
+        return float(sum(float(x) for x in token_logprobs) / len(token_logprobs))
+    except Exception:  # pragma: no cover - objects without length
+        return None
+
+
 def transcribe_paths(
     model: ASRModel,
     paths: List[str],
@@ -107,9 +145,13 @@ def transcribe_paths(
             pnc=pnc,
             return_hypotheses=True,
         )
+        if isinstance(hyps, tuple):
+            hyps = hyps[0]
+
         for p, h in zip(batch, hyps):
             text = ""
             conf = None
+            # Unified handling of various hypothesis formats
             if isinstance(h, str):
                 text = h
             elif isinstance(h, dict):
@@ -117,18 +159,19 @@ def transcribe_paths(
                 conf = h.get("confidence")
             else:
                 text = getattr(h, "text", getattr(h, "pred_text", str(h)))
-                # ``score`` is typically the sum of log probs. Normalise by token
-                # count if available.
                 score = getattr(h, "score", None)
                 token_logprobs = getattr(h, "token_logprobs", None)
-                if token_logprobs:
-                    conf = float(sum(token_logprobs) / len(token_logprobs))
-                elif score is not None:
+
+                conf = _mean_logprob(token_logprobs)
+                if conf is None and score is not None:
                     tokens = getattr(h, "tokens", None)
                     if tokens is None:
-                        tokens = getattr(h, "y_sequence", []) or []
-                    length = len(tokens) or 1
-                    conf = float(score) / length
+                        tokens = getattr(h, "y_sequence", None)
+                    length = _safe_len(tokens)
+                    if torch.is_tensor(score):
+                        score = float(score.detach().item())
+                    conf = score / (length if length > 0 else 1)
+
             results[p] = {"text": text, "confidence": conf}
         try:
             torch.cuda.empty_cache()
