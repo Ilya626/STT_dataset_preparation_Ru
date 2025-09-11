@@ -12,6 +12,17 @@ import webrtcvad
 from datasets import load_dataset, Audio
 from tqdm import tqdm
 
+# Reduce memory usage by decoding audio as float32 instead of default float64
+_sf_read = sf.read
+
+
+def _sf_read_float32(*args, **kwargs):
+    kwargs.setdefault("dtype", "float32")
+    return _sf_read(*args, **kwargs)
+
+
+sf.read = _sf_read_float32
+
 
 # ----- Настройки скачивания -----
 # Укажите здесь ссылку на набор данных Hugging Face (например "nvidia/voice")
@@ -141,7 +152,7 @@ def _process_row(i: int, row: dict, name: str, audio_dir: Path,
     audio = row.get("audio")
     if not audio:
         return None
-    arr = np.asarray(audio["array"])
+    arr = np.asarray(audio["array"], dtype=np.float32)
     sr = int(audio["sampling_rate"])
     try:
         arr, sr = ensure_wav_mono16k(arr, sr)
@@ -182,7 +193,8 @@ def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
                               lang_regex: re.Pattern | None, hf_token: str | None,
                               cache_dir: Path | None = None, num_workers: int = 10,
                               min_dur: float = MIN_DUR, max_dur: float = MAX_DUR,
-                              pause_sec: float = PAUSE_SEC, vad_mode: int = VAD_MODE):
+                              pause_sec: float = PAUSE_SEC, vad_mode: int = VAD_MODE,
+                              chunk_size: int = 100):
     """Download HF dataset split and store as 16k mono wav + manifest."""
 
     name = f"{repo.replace('/', '___')}_{split}"
@@ -198,7 +210,7 @@ def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
     if cache_dir:
         kwargs["cache_dir"] = str(cache_dir)
     try:
-        ds = load_dataset(repo, split=split, streaming=False, **kwargs)
+        ds = load_dataset(repo, split=split, streaming=True, **kwargs)
     except Exception as exc:  # pragma: no cover - network path
         print(f"[skip] {repo}:{split} -> {exc}")
         return None
@@ -213,27 +225,47 @@ def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
 
     kept = 0
 
-    total = len(ds)
-    chunk_size = (total + num_workers - 1) // num_workers
-    chunks = []
-    for start in range(0, total, chunk_size):
-        end = min(start + chunk_size, total)
-        chunk = [(i, ds[i]) for i in range(start, end)]
-        chunks.append(chunk)
+    total = None
+    if getattr(ds, "info", None) and ds.info.splits and split in ds.info.splits:
+        total = ds.info.splits[split].num_examples
 
     with manifest.open("w", encoding="utf-8") as fo, ProcessPoolExecutor(max_workers=num_workers) as ex:
-        futures = {ex.submit(_process_chunk, chunk, name, audio_dir,
-                             lang_regex, min_dur, max_dur,
-                             pause_sec, vad_mode): len(chunk)
-                   for chunk in chunks}
-        with tqdm(total=total, desc=f"{repo}:{split}") as pbar:
-            for fut in as_completed(futures):
+        pbar = tqdm(total=total, desc=f"{repo}:{split}")
+        futures: list[tuple] = []
+        chunk: list[tuple[int, dict]] = []
+        idx = 0
+        for row in ds:
+            chunk.append((idx, row))
+            idx += 1
+            if len(chunk) >= chunk_size:
+                futures.append((ex.submit(_process_chunk, chunk, name, audio_dir,
+                                           lang_regex, min_dur, max_dur,
+                                           pause_sec, vad_mode), len(chunk)))
+                chunk = []
+
+            while len(futures) >= num_workers:
+                fut = next(as_completed([f for f, _ in futures]))
+                size = next(sz for f, sz in futures if f is fut)
+                futures = [(f, sz) for f, sz in futures if f is not fut]
                 items = fut.result()
                 if items:
                     for item in items:
                         fo.write(json.dumps(item, ensure_ascii=False) + "\n")
                         kept += 1
-                pbar.update(futures[fut])
+                pbar.update(size)
+
+        if chunk:
+            futures.append((ex.submit(_process_chunk, chunk, name, audio_dir,
+                                       lang_regex, min_dur, max_dur,
+                                       pause_sec, vad_mode), len(chunk)))
+
+        for fut, size in futures:
+            items = fut.result()
+            if items:
+                for item in items:
+                    fo.write(json.dumps(item, ensure_ascii=False) + "\n")
+                    kept += 1
+            pbar.update(size)
 
     print(f"[OK] {name}: {kept} records")
     return {"name": name, "manifest": str(manifest), "dir": str(out_dir), "kept": kept}
@@ -261,6 +293,8 @@ def main():
                         help="Aggressiveness of webrtcvad (0-3)")
     parser.add_argument("--pause-sec", type=float, default=PAUSE_SEC,
                         help="Minimum pause length for splitting")
+    parser.add_argument("--chunk-size", type=int, default=100,
+                        help="Number of dataset rows processed per batch")
 
     args = parser.parse_args()
 
@@ -269,7 +303,8 @@ def main():
     prepare_hf_dataset_to_wav(args.repo, args.split, Path(args.out), regex,
                               args.hf_token, cache_dir, args.workers,
                               args.min_dur, args.max_dur,
-                              args.pause_sec, args.vad_mode)
+                              args.pause_sec, args.vad_mode,
+                              args.chunk_size)
 
 
 if __name__ == "__main__":
