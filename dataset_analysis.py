@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import List
 
@@ -45,11 +46,21 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def _norm(text: str) -> str:
+    """Normalize text by replacing ``ё``/``Ё`` with ``е``/``Е``."""
+
+    return text.replace("ё", "е").replace("Ё", "Е")
+
+
 def compute_semantic_similarity(refs: List[str], hyps: List[str]) -> "np.ndarray":
     """Return cosine similarity between reference and hypothesis texts."""
 
-    import numpy as np
-    from sentence_transformers import SentenceTransformer
+    try:
+        import numpy as np
+        from sentence_transformers import SentenceTransformer
+    except Exception:  # pragma: no cover - optional dependency
+        # Fallback if sentence transformers isn't available.
+        return np.zeros(len(refs)) if refs else []
 
     model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     emb_ref = model.encode(refs)
@@ -65,17 +76,34 @@ def compute_semantic_similarity(refs: List[str], hyps: List[str]) -> "np.ndarray
 def analyse_dataset(pred_file: Path, out_dir: Path, tail_fraction: float) -> None:
     import numpy as np
     from jiwer import wer
-    import matplotlib.pyplot as plt
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:  # pragma: no cover - optional dependency
+        plt = None
 
     rows: List[dict] = []
     refs: List[str] = []
     hyps: List[str] = []
     with pred_file.open("r", encoding="utf-8") as f:
         for line in f:
-            row = json.loads(line)
-            ref = row.get("ref") or row.get("text") or ""
-            hyp = row.get("hyp") or row.get("pred_text") or ""
-            rows.append({"audio": row.get("audio"), "ref": ref, "hyp": hyp})
+            line = line.strip()
+            audio = None
+            # Some prediction dumps contain raw ``Hypothesis(...)`` lines. Extract
+            # the ``text='…'`` segment if encountered.
+            if line.startswith("Hypothesis("):
+                match = re.search(r"text='([^']*)'", line)
+                hyp = match.group(1) if match else ""
+                ref = ""
+            else:
+                row = json.loads(line)
+                audio = row.get("audio")
+                ref = _norm(row.get("ref") or row.get("text") or "")
+                hyp = row.get("hyp") or row.get("pred_text") or ""
+                if isinstance(hyp, str) and hyp.startswith("Hypothesis("):
+                    match = re.search(r"text='([^']*)'", hyp)
+                    hyp = match.group(1) if match else hyp
+            hyp = _norm(hyp)
+            rows.append({"audio": audio, "ref": ref, "hyp": hyp})
             refs.append(ref)
             hyps.append(hyp)
 
@@ -108,28 +136,29 @@ def analyse_dataset(pred_file: Path, out_dir: Path, tail_fraction: float) -> Non
     write_jsonl(out_dir / "easy.jsonl", easy)
     write_jsonl(out_dir / "difficult.jsonl", difficult)
 
-    plt.figure()
-    plt.hist(wers, bins=50)
-    plt.axvline(q_low, color="red", linestyle="dashed")
-    plt.axvline(q_high, color="red", linestyle="dashed")
-    plt.title("WER distribution")
-    plt.xlabel("WER")
-    plt.ylabel("Count")
-    plt.savefig(out_dir / "wer_distribution.png")
+    if plt:
+        plt.figure()
+        plt.hist(wers, bins=50)
+        plt.axvline(q_low, color="red", linestyle="dashed")
+        plt.axvline(q_high, color="red", linestyle="dashed")
+        plt.title("WER distribution")
+        plt.xlabel("WER")
+        plt.ylabel("Count")
+        plt.savefig(out_dir / "wer_distribution.png")
 
-    plt.figure()
-    plt.hist(semantic_sims, bins=50)
-    plt.title("Semantic similarity distribution")
-    plt.xlabel("Cosine similarity")
-    plt.ylabel("Count")
-    plt.savefig(out_dir / "semantic_distribution.png")
+        plt.figure()
+        plt.hist(semantic_sims, bins=50)
+        plt.title("Semantic similarity distribution")
+        plt.xlabel("Cosine similarity")
+        plt.ylabel("Count")
+        plt.savefig(out_dir / "semantic_distribution.png")
 
-    plt.figure()
-    plt.scatter(wers, semantic_sims, alpha=0.5)
-    plt.xlabel("WER")
-    plt.ylabel("Semantic similarity")
-    plt.title("WER vs Semantic similarity")
-    plt.savefig(out_dir / "wer_vs_semantic.png")
+        plt.figure()
+        plt.scatter(wers, semantic_sims, alpha=0.5)
+        plt.xlabel("WER")
+        plt.ylabel("Semantic similarity")
+        plt.title("WER vs Semantic similarity")
+        plt.savefig(out_dir / "wer_vs_semantic.png")
 
     print(f"WER: {w:.4f}")
     print(f"SER: {ser:.4f}")
