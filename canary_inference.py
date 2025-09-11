@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
                         help="Task type for Canary model")
     parser.add_argument("--pnc", default="true",action="store_true",
                         help="Enable punctuation and casing")
-    parser.add_argument("--batch-size", type=int, default=32,
+    parser.add_argument("--batch-size", type=int, default=16,
                         help="Transcription batch size")
     args = parser.parse_args()
     args.dataset_dir = resolve_path(args.dataset_dir)
@@ -81,19 +81,16 @@ def transcribe_paths(model: ASRModel, paths: List[str], batch_size: int,
     results = {}
     batch_size = max(1, int(batch_size))
     import torch, gc
-    from nemo.collections.asr.parts.mixins.transcription import TranscribeConfig
-
-    cfg = TranscribeConfig(batch_size=batch_size, num_workers=4)
 
     for i in range(0, len(paths), batch_size):
         batch = paths[i:i + batch_size]
         hyps = model.transcribe(
             batch,
+            batch_size=batch_size,
             source_lang=source_lang,
             target_lang=target_lang,
             task=task,
             pnc=pnc,
-            override_config=cfg,
         )
         for p, h in zip(batch, hyps):
             if isinstance(h, str):
