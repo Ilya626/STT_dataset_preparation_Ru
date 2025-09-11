@@ -66,9 +66,20 @@ python dataset_analysis.py --preds-dir predictions --out-dir analysis_output
 ```
 
 For each dataset the script computes WER, SER and semantic similarity for each
-utterance, splits the dataset into 30% easy and 70% difficult examples (after
-trimming outliers) and produces distribution plots. Use `--help` to see all
-options, including the `--tail-fraction` parameter that controls outlier
+utterance and derives a combined **difficulty** score, with semantic mismatch
+emphasised over raw WER:
+
+```
+difficulty = 0.3 * WER + 0.7 * (1 - semantic_similarity)
+```
+
+If prediction rows contain a `confidence` field, you can supply
+`--confidence-threshold` to drop low-confidence entries. The script splits the
+dataset into 30% easy and 70% difficult examples (after trimming difficulty
+outliers), builds a Pareto front over difficulty vs confidence, and produces
+distribution plots. The Pareto front and dominated examples are saved as
+`pareto_front.jsonl` and `beyond_pareto.jsonl` respectively. Use `--help` to see
+all options, including the `--tail-fraction` parameter that controls outlier
 trimming.
 
 The script depends on `sentence-transformers` and `matplotlib` which can be
