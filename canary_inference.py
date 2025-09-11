@@ -124,7 +124,10 @@ def transcribe_paths(
                 if token_logprobs:
                     conf = float(sum(token_logprobs) / len(token_logprobs))
                 elif score is not None:
-                    length = len(getattr(h, "tokens", getattr(h, "y_sequence", []))) or 1
+                    tokens = getattr(h, "tokens", None)
+                    if tokens is None:
+                        tokens = getattr(h, "y_sequence", []) or []
+                    length = len(tokens) or 1
                     conf = float(score) / length
             results[p] = {"text": text, "confidence": conf}
         try:
