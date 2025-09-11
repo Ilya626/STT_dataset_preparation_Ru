@@ -40,13 +40,16 @@ python download_dataset.py bond005/taiga_speech_v2 --min-dur 1 --max-dur 15 \
 ```
 
 ## 2. Run Canary inference
-Edit the path constants at the top of `canary_inference.py` to set the dataset
-directory, model and output location, then run:
+`canary_inference.py` accepts command‑line options instead of hard‑coded paths.
+Paths are resolved relative to the script directory, so you can point to folders
+next to the script or provide absolute paths. Example:
 
 ```
-python canary_inference.py
+python canary_inference.py --dataset-dir data_wav --out-dir predictions
 ```
-The script loads the Canary model and writes predictions vs reference text for each audio file.
+
+Use `--help` to see all available options. The script loads the Canary model and
+writes predictions vs reference text for each audio file.
 
 ## 3. Analyse predictions
 Edit the path constants at the top of `dataset_analysis.py` to select the
