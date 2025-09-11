@@ -18,7 +18,8 @@ The script downloads a HuggingFace dataset split, filters Russian samples, conve
 | `--hf-token HF_TOKEN` | Hugging Face access token | env `HF_TOKEN` |
 | `--lang-regex LANG_REGEX` | Regex to match Russian samples | `(^|[-_])ru([-_]|$)|russian` |
 | `--cache-dir CACHE_DIR` | Datasets cache directory | `hf_cache` |
-| `--workers WORKERS` | Number of parallel workers | `10` |
+| `--workers WORKERS` | Number of worker processes | `10` |
+| `--prefetch PREFETCH` | Prefetch factor to read rows ahead of workers | `2` |
 | `--min-dur MIN_DUR` | Minimum audio duration (sec) | `1.0` |
 | `--max-dur MAX_DUR` | Maximum audio duration (sec) | `35.0` |
 | `--vad-mode VAD_MODE` | Aggressiveness of VAD (0–3) | `2` |
