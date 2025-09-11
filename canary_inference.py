@@ -97,6 +97,8 @@ def transcribe_paths(model: ASRModel, paths: List[str], batch_size: int,
                 results[p] = h
             elif isinstance(h, dict):
                 results[p] = h.get("text") or h.get("pred_text") or str(h)
+            elif hasattr(h, "text") or hasattr(h, "pred_text"):
+                results[p] = getattr(h, "text", getattr(h, "pred_text", str(h)))
             else:
                 results[p] = str(h)
         try:
