@@ -51,12 +51,23 @@ def parse_args() -> argparse.Namespace:
                         help="Source language for inference")
     parser.add_argument("--target-lang", default="ru",
                         help="Target language for inference")
-    parser.add_argument("--task", default="asr",
-                        help="Task type for Canary model")
-    parser.add_argument("--pnc", default="true",action="store_true",
-                        help="Enable punctuation and casing")
-    parser.add_argument("--batch-size", type=int, default=32,
-                        help="Transcription batch size")
+
+    pnc = parser.add_mutually_exclusive_group()
+    pnc.add_argument("--pnc", dest="pnc", action="store_true",
+                     help="Enable punctuation and casing (default)")
+    pnc.add_argument("--no-pnc", dest="pnc", action="store_false",
+                     help="Disable punctuation and casing")
+    parser.set_defaults(pnc=True)
+
+    ts = parser.add_mutually_exclusive_group()
+    ts.add_argument("--timestamps", dest="timestamps", action="store_true",
+                    help="Return word/segment timestamps if supported")
+    ts.add_argument("--no-timestamps", dest="timestamps", action="store_false")
+    parser.set_defaults(timestamps=False)
+
+    parser.add_argument("--batch-size", type=int, default=4,
+                        help="Transcription batch size (use 1 for very long files)")
+
     args = parser.parse_args()
     args.dataset_dir = resolve_path(args.dataset_dir)
     args.out_dir = resolve_path(args.out_dir)
@@ -149,13 +160,13 @@ def _safe_mean(values):
 
 
 def transcribe_paths(
-    model: ASRModel,
+    model: "ASRModel",
     paths: List[str],
     batch_size: int,
     source_lang: str,
     target_lang: str,
-    task: str,
     pnc: bool,
+    timestamps: bool,
 ):
     """Transcribe ``paths`` and compute a simple confidence score.
 
@@ -168,6 +179,12 @@ def transcribe_paths(
     batch_size = max(1, int(batch_size))
     import torch, gc
 
+    try:
+        if hasattr(model, "prompt") and hasattr(model.prompt, "update_slots"):
+            model.prompt.update_slots({"pnc": "<|pnc|>" if pnc else "<|nopnc|>"})
+    except Exception:
+        pass
+
     for i in range(0, len(paths), batch_size):
         batch = paths[i : i + batch_size]
         hyps = model.transcribe(
@@ -175,47 +192,42 @@ def transcribe_paths(
             batch_size=batch_size,
             source_lang=source_lang,
             target_lang=target_lang,
-            task=task,
-            pnc=pnc,
+            timestamps=timestamps,
             return_hypotheses=True,
         )
         if isinstance(hyps, tuple):
             hyps = hyps[0]
 
         for p, h in zip(batch, hyps):
-            text = ""
-            conf = None
-            # Unified handling of various hypothesis formats
-            if isinstance(h, str):
-                text = h
-            elif isinstance(h, dict):
-                text = h.get("text") or h.get("pred_text") or str(h)
-                conf = h.get("confidence")
-            else:
-                text = getattr(h, "text", getattr(h, "pred_text", str(h)))
-                score = getattr(h, "score", None)
-                token_logprobs = getattr(h, "token_logprobs", None)
-                token_confidence = getattr(h, "token_confidence", None)
+            text = getattr(h, "text", getattr(h, "pred_text", str(h)))
 
-                conf = _safe_mean(token_confidence)
-                if conf is None:
-                    conf = _mean_logprob(token_logprobs)
-                if conf is None and score is not None:
-                    tokens = getattr(h, "tokens", None)
-                    if tokens is None:
-                        tokens = getattr(h, "y_sequence", None)
-                    length = _safe_len(tokens)
-                    if torch.is_tensor(score):
-                        score = float(score.detach().item())
-                    conf = score / (length if length > 0 else 1)
+            conf = None
+            token_conf = getattr(h, "token_confidence", None) or getattr(
+                h, "word_confidence", None
+            )
+            if token_conf:
+                conf = _safe_mean(token_conf)
+            else:
+                score = getattr(h, "score", None)
+                length = getattr(h, "length", None)
+                if score not in (None, 0.0) and isinstance(length, (int, float)) and length > 0:
+                    try:
+                        import torch
+
+                        if torch.is_tensor(score):
+                            score = float(score.detach().item())
+                    except Exception:
+                        pass
+                    conf = float(score) / float(length)
 
             results[p] = {"text": text, "confidence": conf}
         try:
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
-        except Exception:  # pragma: no cover - CPU path
+        except Exception:
             pass
         gc.collect()
+
     return results
 
 
@@ -231,8 +243,8 @@ def main() -> None:
         args.batch_size,
         args.source_lang,
         args.target_lang,
-        args.task,
         args.pnc,
+        args.timestamps,
     )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
