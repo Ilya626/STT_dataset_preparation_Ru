@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
                         help="Task type for Canary model")
     parser.add_argument("--pnc", default="true",action="store_true",
                         help="Enable punctuation and casing")
-    parser.add_argument("--batch-size", type=int, default=16,
+    parser.add_argument("--batch-size", type=int, default=32,
                         help="Transcription batch size")
     args = parser.parse_args()
     args.dataset_dir = resolve_path(args.dataset_dir)

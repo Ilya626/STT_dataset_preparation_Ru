@@ -9,7 +9,7 @@ from typing import List
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_PREDS_DIR = Path("predictions")
 DEFAULT_OUT_DIR = Path("analysis_output")
-PRED_FILE_NAME = "preds.jsonl"
+PRED_FILE_NAME = "predictions.jsonl"
 DEFAULT_TAIL_FRACTION = 0.05
 
 
