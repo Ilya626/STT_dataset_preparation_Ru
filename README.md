@@ -82,6 +82,10 @@ distribution plots. The Pareto front and dominated examples are saved as
 all options, including the `--tail-fraction` parameter that controls outlier
 trimming.
 
+When confidence values are present, aggregated statistics (mean, median, 5‑th
+and 95‑th percentiles) are written to `confidence_stats.json` to provide a quick
+overview of model certainty.
+
 The script depends on `sentence-transformers` and `matplotlib` which can be
 installed via pip:
 

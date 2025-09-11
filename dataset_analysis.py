@@ -151,6 +151,21 @@ def analyse_dataset(
         )
         difficulty_scores.append(difficulty)
 
+    conf_vals = [r["confidence"] for r in rows if r.get("confidence") is not None]
+    if conf_vals:
+        confidence_stats = {
+            "mean": float(np.mean(conf_vals)),
+            "median": float(np.median(conf_vals)),
+            "p05": float(np.quantile(conf_vals, 0.05)),
+            "p95": float(np.quantile(conf_vals, 0.95)),
+        }
+        with (out_dir / "confidence_stats.json").open("w", encoding="utf-8") as f:
+            json.dump(confidence_stats, f, ensure_ascii=False, indent=2)
+        print(
+            "Confidence statistics:",
+            ", ".join(f"{k}={v:.4f}" for k, v in confidence_stats.items()),
+        )
+
     # ------------------------------------------------------------------
     # Pareto front based on ``difficulty`` and ``confidence``
     # We minimise difficulty while maximising confidence.
