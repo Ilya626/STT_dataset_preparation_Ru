@@ -40,6 +40,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_TAIL_FRACTION,
         help="Fraction of WER tail to drop at each end",
     )
+    parser.add_argument(
+        "--semantic-weight",
+        type=float,
+        default=2.0,
+        help="Weight for semantic similarity contribution to difficulty",
+    )
+    parser.add_argument(
+        "--wer-weight",
+        type=float,
+        default=1.0,
+        help="Weight for WER contribution to difficulty",
+    )
     args = parser.parse_args()
     args.preds_dir = resolve_path(args.preds_dir)
     args.out_dir = resolve_path(args.out_dir)
@@ -73,7 +85,13 @@ def compute_semantic_similarity(refs: List[str], hyps: List[str]) -> "np.ndarray
     return sims
 
 
-def analyse_dataset(pred_file: Path, out_dir: Path, tail_fraction: float) -> None:
+def analyse_dataset(
+    pred_file: Path,
+    out_dir: Path,
+    tail_fraction: float,
+    semantic_weight: float,
+    wer_weight: float,
+) -> None:
     import numpy as np
     from jiwer import wer
     try:
@@ -115,7 +133,15 @@ def analyse_dataset(pred_file: Path, out_dir: Path, tail_fraction: float) -> Non
     semantic_sims = compute_semantic_similarity(refs, hyps)
 
     for row, swer, sim, sf in zip(rows, sample_wers, semantic_sims, ser_flags):
-        row.update({"wer": swer, "semantic": float(sim), "ser": int(sf)})
+        difficulty = semantic_weight * (1 - sim) + wer_weight * swer
+        row.update(
+            {
+                "wer": swer,
+                "semantic": float(sim),
+                "ser": int(sf),
+                "difficulty": float(difficulty),
+            }
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -123,7 +149,7 @@ def analyse_dataset(pred_file: Path, out_dir: Path, tail_fraction: float) -> Non
     q_low = np.quantile(wers, tail_fraction)
     q_high = np.quantile(wers, 1 - tail_fraction)
     filtered = [r for r in rows if q_low <= r["wer"] <= q_high]
-    filtered.sort(key=lambda r: r["wer"])
+    filtered.sort(key=lambda r: r["difficulty"])
     cut = int(len(filtered) * 0.3)
     easy = filtered[:cut]
     difficult = filtered[cut:]
@@ -179,7 +205,13 @@ def main() -> None:
             continue
         out_dir = args.out_dir / pred_dir.name
         print(f"Analyzing {pred_dir.name}...")
-        analyse_dataset(pred_file, out_dir, args.tail_fraction)
+        analyse_dataset(
+            pred_file,
+            out_dir,
+            args.tail_fraction,
+            args.semantic_weight,
+            args.wer_weight,
+        )
 
 
 if __name__ == "__main__":

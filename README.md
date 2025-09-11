@@ -62,14 +62,17 @@ contain a `preds.jsonl` file with model outputs. For every dataset folder the
 script writes analysis results to `analysis_output/<dataset_name>/`.
 
 ```
-python dataset_analysis.py --preds-dir predictions --out-dir analysis_output
+python dataset_analysis.py --preds-dir predictions --out-dir analysis_output \
+    --semantic-weight 2.0 --wer-weight 1.0
 ```
 
 For each dataset the script computes WER, SER and semantic similarity for each
-utterance, splits the dataset into 30% easy and 70% difficult examples (after
-trimming outliers) and produces distribution plots. Use `--help` to see all
-options, including the `--tail-fraction` parameter that controls outlier
-trimming.
+utterance, combines them into a difficulty score
+`difficulty = semantic_weight * (1 - semantic) + wer_weight * wer`, then splits
+the dataset into 30% easy and 70% difficult examples (after trimming outliers)
+and produces distribution plots. Use `--help` to see all options, including the
+`--tail-fraction` parameter that controls outlier trimming and the weights
+`--semantic-weight` (default `2.0`) and `--wer-weight` (default `1.0`).
 
 The script depends on `sentence-transformers` and `matplotlib` which can be
 installed via pip:
