@@ -4,7 +4,7 @@ import json
 import os
 import re
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 
 import numpy as np
 import soundfile as sf
@@ -177,9 +177,18 @@ def _process_row(i: int, row: dict, name: str, audio_dir: Path,
 def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
                               lang_regex: re.Pattern | None, hf_token: str | None,
                               cache_dir: Path | None = None, num_workers: int = 10,
+                              prefetch: int = 2,
                               min_dur: float = MIN_DUR, max_dur: float = MAX_DUR,
                               pause_sec: float = PAUSE_SEC, vad_mode: int = VAD_MODE):
-    """Download HF dataset split and store as 16k mono wav + manifest."""
+    """Download HF dataset split and store as 16k mono wav + manifest.
+
+    Parameters
+    ----------
+    prefetch:
+        Number of batches to prefetch per worker. Higher values allow the main
+        thread to read dataset rows ahead of worker execution which keeps
+        workers busy and reduces disk I/O stalls.
+    """
 
     name = f"{repo.replace('/', '___')}_{split}"
     out_dir = out_root / name
@@ -213,7 +222,9 @@ def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
     if getattr(ds, "info", None) and ds.info.splits and split in ds.info.splits:
         total = ds.info.splits[split].num_examples
 
-    with manifest.open("w", encoding="utf-8") as fo, ThreadPoolExecutor(max_workers=num_workers) as ex:
+    max_pending = max(num_workers, num_workers * prefetch)
+
+    with manifest.open("w", encoding="utf-8") as fo, ProcessPoolExecutor(max_workers=num_workers) as ex:
         pbar = tqdm(total=total, desc=f"{repo}:{split}")
         pending = set()
         idx = 0
@@ -222,7 +233,7 @@ def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
                                   lang_regex, min_dur, max_dur,
                                   pause_sec, vad_mode))
             idx += 1
-            if len(pending) >= num_workers:
+            if len(pending) >= max_pending:
                 done, pending = wait(pending, return_when=FIRST_COMPLETED)
                 for fut in done:
                     items = fut.result()
@@ -259,7 +270,9 @@ def main():
     parser.add_argument("--cache-dir", dest="cache_dir", default=HF_CACHE_DIR,
                         help="HF datasets cache directory")
     parser.add_argument("--workers", type=int, default=10,
-                        help="Number of concurrent workers for processing")
+                        help="Number of worker processes for parallel processing")
+    parser.add_argument("--prefetch", type=int, default=2,
+                        help="Prefetch factor to read dataset rows ahead of workers")
     parser.add_argument("--min-dur", type=float, default=MIN_DUR,
                         help="Minimum duration of kept audio segments")
     parser.add_argument("--max-dur", type=float, default=MAX_DUR,
@@ -273,7 +286,7 @@ def main():
     regex = re.compile(args.lang_regex, re.IGNORECASE) if args.lang_regex else None
     cache_dir = Path(args.cache_dir) if args.cache_dir else None
     prepare_hf_dataset_to_wav(args.repo, args.split, Path(args.out), regex,
-                              args.hf_token, cache_dir, args.workers,
+                              args.hf_token, cache_dir, args.workers, args.prefetch,
                               args.min_dur, args.max_dur,
                               args.pause_sec, args.vad_mode)
 
