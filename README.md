@@ -15,7 +15,19 @@ python canary_inference.py <manifest.jsonl> --out preds.jsonl
 Loads the Canary model and writes predictions vs reference text for each audio file.
 
 ## 3. Analyse predictions
+Edit the path constants at the top of `dataset_analysis.py` to select the
+predictions file and output directory, then run:
+
 ```
-python dataset_analysis.py preds.jsonl
+python dataset_analysis.py
 ```
-Prints word error rate (WER) and sentence error rate (SER) for the predictions file.
+The script computes WER, SER and semantic similarity for each utterance, splits
+the dataset into 30% easy and 70% difficult examples (after trimming outliers)
+and produces distribution plots.
+
+The script depends on `sentence-transformers` and `matplotlib` which can be
+installed via pip:
+
+```
+pip install sentence-transformers matplotlib
+```
