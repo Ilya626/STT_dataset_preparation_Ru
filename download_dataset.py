@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 # ----- Настройки скачивания -----
 # Укажите здесь ссылку на набор данных Hugging Face (например "nvidia/voice")
-HF_DATASET_REPO = ""
+HF_DATASET_REPO = "bond005/taiga_speech_v2"
 
 # Укажите здесь ваш токен доступа Hugging Face или оставьте пустым, если он не требуется
 HF_TOKEN = ""
