@@ -126,7 +126,12 @@ def analyse_dataset(
                 audio = row.get("audio")
                 ref = _norm(row.get("ref") or row.get("text") or "")
                 hyp = row.get("hyp") or row.get("pred_text") or ""
-                conf = row.get("confidence") or row.get("conf")
+                # ``or`` would treat a confidence value of 0 as falsy and fall back to
+                # ``row.get('conf')``, resulting in ``None`` when ``conf`` is 0. Capture
+                # the value explicitly so zero is preserved.
+                conf = row.get("confidence")
+                if conf is None:
+                    conf = row.get("conf")
                 if isinstance(hyp, str) and hyp.startswith("Hypothesis("):
                     match = re.search(r"text='([^']*)'", hyp)
                     hyp = match.group(1) if match else hyp
@@ -165,6 +170,8 @@ def analyse_dataset(
         )
         difficulty_scores.append(difficulty)
 
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     conf_vals = [r["confidence"] for r in rows if r.get("confidence") is not None]
     if conf_vals:
         confidence_stats = {
@@ -200,9 +207,6 @@ def analyse_dataset(
         dominated = [r for _, _, r in pairs if r not in pareto_front]
     else:
         dominated = []
-
-
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     wers = np.array(sample_wers)
     diffs = np.array(difficulty_scores)
