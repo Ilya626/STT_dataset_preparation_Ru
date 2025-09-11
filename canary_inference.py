@@ -76,14 +76,28 @@ def load_canary(model_id: str, model_path: Path = MODEL_PATH):
     return ASRModel.from_pretrained(model_name=model_id).eval()
 
 
-def transcribe_paths(model: ASRModel, paths: List[str], batch_size: int,
-                     source_lang: str, target_lang: str, task: str, pnc: bool):
+def transcribe_paths(
+    model: ASRModel,
+    paths: List[str],
+    batch_size: int,
+    source_lang: str,
+    target_lang: str,
+    task: str,
+    pnc: bool,
+):
+    """Transcribe ``paths`` and compute a simple confidence score.
+
+    Confidence is estimated as the mean log probability per token when
+    available. If the model does not return this information, the score is
+    derived from the overall hypothesis score.
+    """
+
     results = {}
     batch_size = max(1, int(batch_size))
     import torch, gc
 
     for i in range(0, len(paths), batch_size):
-        batch = paths[i:i + batch_size]
+        batch = paths[i : i + batch_size]
         hyps = model.transcribe(
             batch,
             batch_size=batch_size,
@@ -91,18 +105,31 @@ def transcribe_paths(model: ASRModel, paths: List[str], batch_size: int,
             target_lang=target_lang,
             task=task,
             pnc=pnc,
+            return_hypotheses=True,
         )
         for p, h in zip(batch, hyps):
+            text = ""
+            conf = None
             if isinstance(h, str):
-                results[p] = h
+                text = h
             elif isinstance(h, dict):
-                results[p] = h.get("text") or h.get("pred_text") or str(h)
-            elif hasattr(h, "text") or hasattr(h, "pred_text"):
-                results[p] = getattr(h, "text", getattr(h, "pred_text", str(h)))
+                text = h.get("text") or h.get("pred_text") or str(h)
+                conf = h.get("confidence")
             else:
-                results[p] = str(h)
+                text = getattr(h, "text", getattr(h, "pred_text", str(h)))
+                # ``score`` is typically the sum of log probs. Normalise by token
+                # count if available.
+                score = getattr(h, "score", None)
+                token_logprobs = getattr(h, "token_logprobs", None)
+                if token_logprobs:
+                    conf = float(sum(token_logprobs) / len(token_logprobs))
+                elif score is not None:
+                    length = len(getattr(h, "tokens", getattr(h, "y_sequence", []))) or 1
+                    conf = float(score) / length
+            results[p] = {"text": text, "confidence": conf}
         try:
-            torch.cuda.empty_cache(); torch.cuda.ipc_collect()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
         except Exception:  # pragma: no cover - CPU path
             pass
         gc.collect()
@@ -115,16 +142,30 @@ def main() -> None:
     items = [json.loads(x) for x in manifest.open("r", encoding="utf-8")]
     uniq_paths = list({it["audio_filepath"] for it in items})
     model = load_canary(args.model_id)
-    preds = transcribe_paths(model, uniq_paths, args.batch_size,
-                             args.source_lang, args.target_lang,
-                             args.task, args.pnc)
+    preds = transcribe_paths(
+        model,
+        uniq_paths,
+        args.batch_size,
+        args.source_lang,
+        args.target_lang,
+        args.task,
+        args.pnc,
+    )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     out_path = args.out_dir / "predictions.jsonl"
     with out_path.open("w", encoding="utf-8") as f:
         for it in tqdm(items, desc="write"):
-            hyp = preds.get(it["audio_filepath"], "")
-            row = {"audio": it["audio_filepath"], "ref": it.get("text", ""), "hyp": hyp}
+            pred = preds.get(it["audio_filepath"], {})
+            hyp = pred.get("text", "")
+            row = {
+                "audio": it["audio_filepath"],
+                "ref": it.get("text", ""),
+                "hyp": hyp,
+            }
+            conf = pred.get("confidence")
+            if conf is not None:
+                row["confidence"] = conf
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     print(f"Saved predictions to {out_path}")
