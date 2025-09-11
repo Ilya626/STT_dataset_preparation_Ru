@@ -4,9 +4,11 @@ import json
 import os
 import re
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 
 import numpy as np
 import soundfile as sf
+import webrtcvad
 from datasets import load_dataset, Audio
 from tqdm import tqdm
 
@@ -27,8 +29,10 @@ MAX_DUR = 35.0
 VAD_MODE = 2  # 0-3, higher = more aggressive
 PAUSE_SEC = 0.3
 
+
 def sha1_name(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()
+
 
 def ensure_wav_mono16k(data: np.ndarray, sr: int):
     """Return mono float32 audio resampled to 16 kHz."""
@@ -44,14 +48,13 @@ def ensure_wav_mono16k(data: np.ndarray, sr: int):
             raise RuntimeError("Need resample to 16k but librosa not available") from exc
     return data, 16000
 
+
 def save_wav(path: Path, data: np.ndarray, sr: int):
     path.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(path), data, sr, subtype="PCM_16", format="WAV")
 
 
-
-def _find_split(arr: np.ndarray, sr: int, min_pause: float,
-                mode: int) -> float:
+def _find_split(arr: np.ndarray, sr: int, min_pause: float, mode: int) -> float:
     """Find a split point (in seconds) near the middle using VAD."""
     vad = webrtcvad.Vad(mode)
     frame_ms = 30
@@ -118,10 +121,6 @@ def _process_row(i: int, row: dict, name: str, audio_dir: Path,
                  lang_regex: re.Pattern | None,
                  min_dur: float, max_dur: float,
                  pause_sec: float, vad_mode: int):
-
-def _process_row(i: int, row: dict, name: str, audio_dir: Path,
-                 lang_regex: re.Pattern | None):
-
     text = None
     for key in ["text", "sentence", "transcript", "transcription", "label", "target"]:
         if key in row and row[key]:
@@ -149,7 +148,6 @@ def _process_row(i: int, row: dict, name: str, audio_dir: Path,
     except Exception:
         return None
 
-
     items = []
     for j, (seg, seg_text) in enumerate(split_audio(arr, sr, text,
                                                     max_dur, pause_sec,
@@ -164,25 +162,14 @@ def _process_row(i: int, row: dict, name: str, audio_dir: Path,
                       "duration": dur})
     return items or None
 
+
 def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
                               lang_regex: re.Pattern | None, hf_token: str | None,
                               cache_dir: Path | None = None, num_workers: int = 10,
                               min_dur: float = MIN_DUR, max_dur: float = MAX_DUR,
                               pause_sec: float = PAUSE_SEC, vad_mode: int = VAD_MODE):
-
-    dur = float(len(arr) / sr)
-    if not (MIN_DUR <= dur <= MAX_DUR):
-        return None
-
-    wav_path = audio_dir / f"{sha1_name(name + '_' + str(i))}.wav"
-    save_wav(wav_path, arr, sr)
-    return {"audio_filepath": str(wav_path), "text": text, "duration": dur}
-
-def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
-                              lang_regex: re.Pattern | None, hf_token: str | None,
-                              cache_dir: Path | None = None, num_workers: int = 10):
-
     """Download HF dataset split and store as 16k mono wav + manifest."""
+
     name = f"{repo.replace('/', '___')}_{split}"
     out_dir = out_root / name
     manifest = out_dir / "manifest.jsonl"
@@ -232,43 +219,25 @@ def prepare_hf_dataset_to_wav(repo: str, split: str, out_root: Path,
                 for item in items:
                     fo.write(json.dumps(item, ensure_ascii=False) + "\n")
                     kept += 1
-=======
-    with manifest.open("w", encoding="utf-8") as fo, ThreadPoolExecutor(max_workers=num_workers) as ex:
-        futures = set()
-        for i, row in enumerate(tqdm(ds, desc=f"{repo}:{split}")):
-            futures.add(ex.submit(_process_row, i, row, name, audio_dir, lang_regex))
-            if len(futures) >= num_workers * 5:
-                done, futures = wait(futures, return_when=FIRST_COMPLETED)
-                for fut in done:
-                    item = fut.result()
-                    if item:
-                        fo.write(json.dumps(item, ensure_ascii=False) + "\n")
-                        kept += 1
-        done, _ = wait(futures)
-        for fut in done:
-            item = fut.result()
-            if item:
-                fo.write(json.dumps(item, ensure_ascii=False) + "\n")
-                kept += 1
 
     print(f"[OK] {name}: {kept} records")
     return {"name": name, "manifest": str(manifest), "dir": str(out_dir), "kept": kept}
 
+
 def main():
     parser = argparse.ArgumentParser(description="Download HF dataset split to wav + manifest")
     parser.add_argument("repo", nargs="?", default=HF_DATASET_REPO,
-                    help="HF dataset repo, e.g. nvidia/voice")
+                        help="HF dataset repo, e.g. nvidia/voice")
     parser.add_argument("--split", default="train")
     parser.add_argument("--out", default="data_wav", help="Output directory")
     parser.add_argument("--hf-token", dest="hf_token",
-                    default=HF_TOKEN or os.environ.get("HF_TOKEN"),
-                    help="HF access token")
+                        default=HF_TOKEN or os.environ.get("HF_TOKEN"),
+                        help="HF access token")
     parser.add_argument("--lang-regex", dest="lang_regex", default="(^|[-_])ru([-_]|$)|russian")
     parser.add_argument("--cache-dir", dest="cache_dir", default=HF_CACHE_DIR,
                         help="HF datasets cache directory")
     parser.add_argument("--workers", type=int, default=10,
                         help="Number of concurrent workers for processing")
-
     parser.add_argument("--min-dur", type=float, default=MIN_DUR,
                         help="Minimum duration of kept audio segments")
     parser.add_argument("--max-dur", type=float, default=MAX_DUR,
@@ -283,13 +252,11 @@ def main():
     regex = re.compile(args.lang_regex, re.IGNORECASE) if args.lang_regex else None
     cache_dir = Path(args.cache_dir) if args.cache_dir else None
     prepare_hf_dataset_to_wav(args.repo, args.split, Path(args.out), regex,
-
                               args.hf_token, cache_dir, args.workers,
                               args.min_dur, args.max_dur,
                               args.pause_sec, args.vad_mode)
 
-                              args.hf_token, cache_dir, args.workers)
-
 
 if __name__ == "__main__":
     main()
+
