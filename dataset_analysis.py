@@ -116,6 +116,7 @@ def analyse_dataset(pred_file: Path, out_dir: Path, tail_fraction: float) -> Non
 
     for row, swer, sim, sf in zip(rows, sample_wers, semantic_sims, ser_flags):
         row.update({"wer": swer, "semantic": float(sim), "ser": int(sf)})
+        row["difficulty"] = 2 * (1 - row["semantic"]) + row["wer"]
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -123,7 +124,7 @@ def analyse_dataset(pred_file: Path, out_dir: Path, tail_fraction: float) -> Non
     q_low = np.quantile(wers, tail_fraction)
     q_high = np.quantile(wers, 1 - tail_fraction)
     filtered = [r for r in rows if q_low <= r["wer"] <= q_high]
-    filtered.sort(key=lambda r: r["wer"])
+    filtered.sort(key=lambda r: r["difficulty"])
     cut = int(len(filtered) * 0.3)
     easy = filtered[:cut]
     difficult = filtered[cut:]
