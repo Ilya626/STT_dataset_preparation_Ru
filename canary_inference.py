@@ -7,6 +7,22 @@ from typing import List, TYPE_CHECKING
 
 from tqdm import tqdm
 
+# Ensure OmegaConf is available; install on the fly if missing
+try:  # pragma: no cover - optional dependency
+    from omegaconf import OmegaConf
+except Exception:  # pragma: no cover - install if absent
+    import subprocess, sys
+
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "omegaconf"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        from omegaconf import OmegaConf  # type: ignore
+    except Exception:  # pragma: no cover - give up quietly
+        OmegaConf = None
+
 if TYPE_CHECKING:  # pragma: no cover - for type checkers only
     from nemo.collections.asr.models import ASRModel
 
@@ -61,19 +77,32 @@ def load_canary(model_id: str, model_path: Path = MODEL_PATH):
 
     model_path = Path(model_path)
     if model_path.is_file():
-        return ASRModel.restore_from(str(model_path)).eval()
-    if model_path.is_dir():
+        model = ASRModel.restore_from(str(model_path)).eval()
+    elif model_path.is_dir():
         model_name = model_id.split("/")[-1]
         nemo_files = list(model_path.rglob(f"*{model_name}*.nemo")) or list(
             model_path.rglob("*.nemo")
         )
         if nemo_files:
-            return ASRModel.restore_from(str(nemo_files[0])).eval()
-        return ASRModel.from_pretrained(
-            model_name=model_id, cache_dir=str(model_path)
-        ).eval()
+            model = ASRModel.restore_from(str(nemo_files[0])).eval()
+        else:
+            model = ASRModel.from_pretrained(
+                model_name=model_id, cache_dir=str(model_path)
+            ).eval()
+    else:
+        model = ASRModel.from_pretrained(model_name=model_id).eval()
 
-    return ASRModel.from_pretrained(model_name=model_id).eval()
+    # Enable token-level confidence estimation when possible
+    if OmegaConf is not None:
+        try:  # pragma: no cover - optional nemo/omegaconf dependency
+            cfg = OmegaConf.create({"name": "entropy", "alpha": 0.3})
+            model.change_decoding_strategy(
+                preserve_token_confidence=True, confidence_method_cfg=cfg
+            )
+        except Exception:
+            pass
+
+    return model
 
 
 def _safe_len(tokens) -> int:
@@ -95,21 +124,26 @@ def _safe_len(tokens) -> int:
 
 def _mean_logprob(token_logprobs):
     """Compute the mean of log probabilities if possible."""
-    if token_logprobs is None:
+    return _safe_mean(token_logprobs)
+
+
+def _safe_mean(values):
+    """Return the mean of ``values`` if possible."""
+    if values is None:
         return None
     try:  # pragma: no cover - optional torch dependency
         import torch
 
-        if torch.is_tensor(token_logprobs):
-            if token_logprobs.numel() == 0:
+        if torch.is_tensor(values):
+            if values.numel() == 0:
                 return None
-            return float(token_logprobs.mean().item())
+            return float(values.mean().item())
     except Exception:  # pragma: no cover - torch not installed
         pass
     try:
-        if len(token_logprobs) == 0:
+        if len(values) == 0:
             return None
-        return float(sum(float(x) for x in token_logprobs) / len(token_logprobs))
+        return float(sum(float(x) for x in values) / len(values))
     except Exception:  # pragma: no cover - objects without length
         return None
 
@@ -125,9 +159,9 @@ def transcribe_paths(
 ):
     """Transcribe ``paths`` and compute a simple confidence score.
 
-    Confidence is estimated as the mean log probability per token when
-    available. If the model does not return this information, the score is
-    derived from the overall hypothesis score.
+    Confidence is estimated from per-token probabilities when available.
+    If the model does not provide them, log probabilities or the overall
+    hypothesis score are used as fallbacks.
     """
 
     results = {}
@@ -161,8 +195,11 @@ def transcribe_paths(
                 text = getattr(h, "text", getattr(h, "pred_text", str(h)))
                 score = getattr(h, "score", None)
                 token_logprobs = getattr(h, "token_logprobs", None)
+                token_confidence = getattr(h, "token_confidence", None)
 
-                conf = _mean_logprob(token_logprobs)
+                conf = _safe_mean(token_confidence)
+                if conf is None:
+                    conf = _mean_logprob(token_logprobs)
                 if conf is None and score is not None:
                     tokens = getattr(h, "tokens", None)
                     if tokens is None:
