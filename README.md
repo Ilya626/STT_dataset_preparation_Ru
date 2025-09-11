@@ -56,15 +56,20 @@ Use `--help` to see all available options. The script loads the Canary model and
 writes predictions vs reference text for each audio file.
 
 ## 3. Analyse predictions
-Edit the path constants at the top of `dataset_analysis.py` to select the
-predictions file and output directory, then run:
+`dataset_analysis.py` resolves paths relative to the script directory and scans
+the `predictions/` folder for subdirectories. Each subfolder is expected to
+contain a `preds.jsonl` file with model outputs. For every dataset folder the
+script writes analysis results to `analysis_output/<dataset_name>/`.
 
 ```
-python dataset_analysis.py
+python dataset_analysis.py --preds-dir predictions --out-dir analysis_output
 ```
-The script computes WER, SER and semantic similarity for each utterance, splits
-the dataset into 30% easy and 70% difficult examples (after trimming outliers)
-and produces distribution plots.
+
+For each dataset the script computes WER, SER and semantic similarity for each
+utterance, splits the dataset into 30% easy and 70% difficult examples (after
+trimming outliers) and produces distribution plots. Use `--help` to see all
+options, including the `--tail-fraction` parameter that controls outlier
+trimming.
 
 The script depends on `sentence-transformers` and `matplotlib` which can be
 installed via pip:
