@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     ts.add_argument("--no-timestamps", dest="timestamps", action="store_false")
     parser.set_defaults(timestamps=False)
 
-    parser.add_argument("--batch-size", type=int, default=4,
+    parser.add_argument("--batch-size", type=int, default=32,
                         help="Transcription batch size (use 1 for very long files)")
 
     args = parser.parse_args()
