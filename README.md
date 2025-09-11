@@ -40,13 +40,17 @@ python download_dataset.py bond005/taiga_speech_v2 --min-dur 1 --max-dur 15 \
 ```
 
 ## 2. Run Canary inference
-`canary_inference.py` accepts command‑line options instead of hard‑coded paths.
-Paths are resolved relative to the script directory, so you can point to folders
-next to the script or provide absolute paths. Example:
+`canary_inference.py` resolves dataset and output paths relative to the script
+directory, so you can point to folders next to it or provide absolute paths.
+Example:
 
 ```
 python canary_inference.py --dataset-dir data_wav --out-dir predictions
 ```
+
+The model cache is expected under `.hf/models--nvidia--canary-1b-v2`
+relative to the script. To use a different Hugging Face cache or `.nemo`
+file, edit the `MODEL_PATH` constant in `canary_inference.py`.
 
 Use `--help` to see all available options. The script loads the Canary model and
 writes predictions vs reference text for each audio file.
