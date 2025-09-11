@@ -1,4 +1,3 @@
-import argparse
 import json
 from pathlib import Path
 from typing import List
@@ -6,6 +5,16 @@ from typing import List
 from nemo.collections.asr.models import ASRModel
 from tqdm import tqdm
 
+
+# configuration
+DATASET_DIR = Path("data_wav")
+OUT_DIR = Path("predictions")
+MODEL_ID = "nvidia/canary-1b-v2"
+NEMO_PATH: str | None = None
+SOURCE_LANG = "ru"
+TARGET_LANG = "ru"
+TASK = "asr"
+PNC = False
 
 # Batch settings
 BATCH_SIZE = 16
@@ -43,30 +52,22 @@ def transcribe_paths(model: ASRModel, paths: List[str],
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run Canary inference and save preds vs refs")
-    parser.add_argument("manifest", help="Path to manifest.jsonl produced by download_dataset.py")
-    parser.add_argument("--out", default="predictions.jsonl")
-    parser.add_argument("--model-id", default="nvidia/canary-1b-v2")
-    parser.add_argument("--nemo-path", default=None)
-    parser.add_argument("--source-lang", default="ru")
-    parser.add_argument("--target-lang", default="ru")
-    parser.add_argument("--task", default="asr")
-    parser.add_argument("--pnc", action="store_true", help="Enable punctuation and casing")
-    args = parser.parse_args()
-
-    items = [json.loads(x) for x in Path(args.manifest).open("r", encoding="utf-8")]
+    manifest = DATASET_DIR / "manifest.jsonl"
+    items = [json.loads(x) for x in manifest.open("r", encoding="utf-8")]
     uniq_paths = list({it["audio_filepath"] for it in items})
-    model = load_canary(args.model_id, args.nemo_path)
+    model = load_canary(MODEL_ID, NEMO_PATH)
     preds = transcribe_paths(model, uniq_paths,
-                             args.source_lang, args.target_lang, args.task, args.pnc)
+                             SOURCE_LANG, TARGET_LANG, TASK, PNC)
 
-    with Path(args.out).open("w", encoding="utf-8") as f:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = OUT_DIR / "predictions.jsonl"
+    with out_path.open("w", encoding="utf-8") as f:
         for it in tqdm(items, desc="write"):
             hyp = preds.get(it["audio_filepath"], "")
             row = {"audio": it["audio_filepath"], "ref": it.get("text", ""), "hyp": hyp}
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    print(f"Saved predictions to {args.out}")
+    print(f"Saved predictions to {out_path}")
 
 
 if __name__ == "__main__":
