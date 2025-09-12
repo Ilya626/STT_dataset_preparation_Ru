@@ -12,9 +12,6 @@ DEFAULT_PREDS_DIR = Path("predictions")
 DEFAULT_OUT_DIR = Path("analysis_output")
 PRED_FILE_NAME = "predictions.jsonl"
 DEFAULT_TAIL_FRACTION = 0.05
-# Semantics carry more weight than raw WER in the difficulty score
-DIFFICULTY_WER_WEIGHT = 0.3
-DIFFICULTY_SEM_WEIGHT = 1.0 - DIFFICULTY_WER_WEIGHT
 
 
 def resolve_path(p: Path) -> Path:
@@ -62,9 +59,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def _norm(text: str) -> str:
-    """Normalize text by replacing ``ё``/``Ё`` with ``е``/``Е``."""
+    """Normalize text for fair comparison.
 
-    return text.replace("ё", "е").replace("Ё", "Е")
+    The normalization performs the following steps:
+    1. Replace ``ё``/``Ё`` with ``е``/``Е`` to avoid treating them as
+       different letters.
+    2. Convert the text to lower case so WER is case-insensitive.
+    3. Remove punctuation, keeping word boundaries intact.
+    """
+
+    text = text.replace("ё", "е").replace("Ё", "Е").lower()
+    # Replace any punctuation with a space and collapse multiple spaces.
+    text = re.sub(r"[^\w\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def compute_semantic_similarity(refs: List[str], hyps: List[str]) -> "np.ndarray":
@@ -92,6 +100,8 @@ def analyse_dataset(
     pred_file: Path,
     out_dir: Path,
     tail_fraction: float,
+    semantic_weight: float,
+    wer_weight: float,
 ) -> None:
     import numpy as np
     from jiwer import wer
@@ -137,10 +147,7 @@ def analyse_dataset(
     difficulty_scores = []
     for row, swer, sim, sf in zip(rows, sample_wers, semantic_sims, ser_flags):
 
-        difficulty = (
-            DIFFICULTY_WER_WEIGHT * swer
-            + DIFFICULTY_SEM_WEIGHT * (1.0 - float(sim))
-        )
+        difficulty = wer_weight * swer + semantic_weight * (1.0 - float(sim))
 
         row.update(
             {
@@ -259,6 +266,8 @@ def main() -> None:
             pred_file,
             out_dir,
             args.tail_fraction,
+            args.semantic_weight,
+            args.wer_weight,
         )
 
 
