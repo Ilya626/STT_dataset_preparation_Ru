@@ -87,3 +87,22 @@ installed via pip:
 ```
 pip install sentence-transformers matplotlib
 ```
+
+## 4. Filter and mix datasets
+After analysing individual datasets you can build a combined training split
+that emphasises difficult examples while keeping some easy ones for balance.
+
+```
+python dataset_filter_and_mix.py --analysis-dir analysis_output \
+    --out final_mix.jsonl --dataset-dir fine-tuning-dataset-$(date +%Y%m%d)
+```
+
+The script walks through all subfolders in `analysis_output/`, counts `easy`
+and `difficult` examples, and for datasets with at least 1000 records performs
+PCA over normalised `wer`, `semantic` and scaled `difficulty` scores. Each
+large dataset contributes both categories (≈80% difficult, 20% easy) so the
+final mix contains roughly 20–25k samples with representation from every
+source. Smaller datasets (<1000 samples) are included in full. In addition to
+writing the JSONL mix it also creates a folder named
+`fine-tuning-dataset-YYYYMMDD/` (or a custom path via `--dataset-dir`) that
+contains `manifest.json` and copies of all referenced WAV files.

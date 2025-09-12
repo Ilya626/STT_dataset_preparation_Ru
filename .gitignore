@@ -3,3 +3,5 @@ hf_cache
 .hf
 predictions
 analysis_output
+__pycache__/
+*.pyc
