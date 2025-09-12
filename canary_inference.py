@@ -41,9 +41,9 @@ def resolve_path(p: Path) -> Path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Canary inference on a dataset")
-    parser.add_argument("--dataset-dir", type=Path, default=Path("data_wav\\bond005___podlodka_speech_train"),
+    parser.add_argument("--dataset-dir", type=Path, default=Path("data_wav\\Vikhrmodels___ToneRuDevices_train"),
                         help="Directory containing manifest.jsonl")
-    parser.add_argument("--out-dir", type=Path, default=Path("predictions\\bond005___podlodka_speech_train"),
+    parser.add_argument("--out-dir", type=Path, default=Path("predictions\\Vikhrmodels___ToneRuDevices_train"),
                         help="Directory to save predictions")
     parser.add_argument("--model-id", default="nvidia/canary-1b-v2",
                         help="HuggingFace model identifier")
