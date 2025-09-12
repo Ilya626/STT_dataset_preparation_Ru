@@ -74,19 +74,12 @@ emphasised over raw WER:
 difficulty = 0.3 * WER + 0.7 * (1 - semantic_similarity)
 ```
 
-If prediction rows contain a `confidence` field, you can supply
-`--confidence-threshold` to drop low-confidence entries. The script splits the
-dataset into 30% easy and 70% difficult examples (after trimming difficulty
-outliers), builds a Pareto front over difficulty vs confidence, and produces
-distribution plots. The Pareto front and dominated examples are saved as
-`pareto_front.jsonl` and `beyond_pareto.jsonl` respectively. Use `--help` to see
-all options, including the `--tail-fraction` parameter that controls outlier
-trimming.
-
-
-When confidence values are present, aggregated statistics (mean, median, 5‑th
-and 95‑th percentiles) are written to `confidence_stats.json` to provide a quick
-overview of model certainty.
+The script splits the dataset into 30% easy and 70% difficult examples (after
+trimming difficulty outliers) and builds a Pareto front over WER vs semantic
+similarity. Distribution plots and the WER/semantic Pareto diagram are written
+alongside the front and dominated examples in `pareto_front.jsonl` and
+`beyond_pareto.jsonl`. Use `--help` to see all options, including the
+`--tail-fraction` parameter that controls outlier trimming.
 
 The script depends on `sentence-transformers` and `matplotlib` which can be
 installed via pip:
