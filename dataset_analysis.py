@@ -44,12 +44,6 @@ def parse_args() -> argparse.Namespace:
         help="Fraction of difficulty tail to drop at each end",
     )
     parser.add_argument(
-        "--confidence-threshold",
-        type=float,
-        default=None,
-        help="If set, skip predictions with confidence below this value",
-    )
-    parser.add_argument(
         "--semantic-weight",
         type=float,
         default=2.0,
@@ -98,7 +92,6 @@ def analyse_dataset(
     pred_file: Path,
     out_dir: Path,
     tail_fraction: float,
-    confidence_threshold: float | None = None,
 ) -> None:
     import numpy as np
     from jiwer import wer
@@ -114,7 +107,6 @@ def analyse_dataset(
         for line in f:
             line = line.strip()
             audio = None
-            conf = None
             # Some prediction dumps contain raw ``Hypothesis(...)`` lines. Extract
             # the ``text='…'`` segment if encountered.
             if line.startswith("Hypothesis("):
@@ -126,21 +118,11 @@ def analyse_dataset(
                 audio = row.get("audio")
                 ref = _norm(row.get("ref") or row.get("text") or "")
                 hyp = row.get("hyp") or row.get("pred_text") or ""
-                # ``or`` would treat a confidence value of 0 as falsy and fall back to
-                # ``row.get('conf')``, resulting in ``None`` when ``conf`` is 0. Capture
-                # the value explicitly so zero is preserved.
-                conf = row.get("confidence")
-                if conf is None:
-                    conf = row.get("conf")
                 if isinstance(hyp, str) and hyp.startswith("Hypothesis("):
                     match = re.search(r"text='([^']*)'", hyp)
                     hyp = match.group(1) if match else hyp
             hyp = _norm(hyp)
-            if confidence_threshold is not None and conf is not None and conf < confidence_threshold:
-                continue
             row_out = {"audio": audio, "ref": ref, "hyp": hyp}
-            if conf is not None:
-                row_out["confidence"] = conf
             rows.append(row_out)
             refs.append(ref)
             hyps.append(hyp)
@@ -172,38 +154,18 @@ def analyse_dataset(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    conf_vals = [r["confidence"] for r in rows if r.get("confidence") is not None]
-    if conf_vals:
-        confidence_stats = {
-            "mean": float(np.mean(conf_vals)),
-            "median": float(np.median(conf_vals)),
-            "p05": float(np.quantile(conf_vals, 0.05)),
-            "p95": float(np.quantile(conf_vals, 0.95)),
-        }
-        with (out_dir / "confidence_stats.json").open("w", encoding="utf-8") as f:
-            json.dump(confidence_stats, f, ensure_ascii=False, indent=2)
-        print(
-            "Confidence statistics:",
-            ", ".join(f"{k}={v:.4f}" for k, v in confidence_stats.items()),
-        )
-
     # ------------------------------------------------------------------
-    # Pareto front based on ``difficulty`` and ``confidence``
-    # We minimise difficulty while maximising confidence.
+    # Pareto front based on ``WER`` (minimise) and ``semantic`` similarity (maximise)
     # ------------------------------------------------------------------
-    pairs = [
-        (r["difficulty"], r.get("confidence"), r)
-        for r in rows
-        if r.get("confidence") is not None
-    ]
+    pairs = [(r["wer"], r["semantic"], r) for r in rows]
     pareto_front: List[dict] = []
     if pairs:
-        pairs.sort(key=lambda x: x[0])  # sort by increasing difficulty
-        best_conf = float("-inf")
-        for w, c, r in pairs:
-            if c >= best_conf:
+        pairs.sort(key=lambda x: x[0])  # sort by increasing WER
+        best_sem = float("-inf")
+        for w, s, r in pairs:
+            if s >= best_sem:
                 pareto_front.append(r)
-                best_conf = c
+                best_sem = s
         dominated = [r for _, _, r in pairs if r not in pareto_front]
     else:
         dominated = []
@@ -229,12 +191,7 @@ def analyse_dataset(
     write_jsonl(out_dir / "pareto_front.jsonl", pareto_front)
     write_jsonl(
         out_dir / "beyond_pareto.jsonl",
-        sorted(
-            dominated,
-            key=lambda r: (r.get("confidence", float("inf")), -r["difficulty"]),
-        )
-        if dominated
-        else [],
+        sorted(dominated, key=lambda r: (r["wer"], -r["semantic"])) if dominated else [],
     )
 
     if plt:
@@ -266,25 +223,18 @@ def analyse_dataset(
         plt.savefig(out_dir / "semantic_distribution.png")
 
         plt.figure()
-        plt.scatter(wers, semantic_sims, alpha=0.5)
+        all_wers = [p[0] for p in pairs]
+        all_sem = [p[1] for p in pairs]
+        plt.scatter(all_wers, all_sem, alpha=0.5, label="all")
+        if pareto_front:
+            front_wers = [r["wer"] for r in pareto_front]
+            front_sem = [r["semantic"] for r in pareto_front]
+            plt.plot(front_wers, front_sem, color="red", marker="o", label="Pareto front")
         plt.xlabel("WER")
         plt.ylabel("Semantic similarity")
         plt.title("WER vs Semantic similarity")
-        plt.savefig(out_dir / "wer_vs_semantic.png")
-
-        if pairs:
-            plt.figure()
-            all_diff = [p[0] for p in pairs]
-            all_conf = [p[1] for p in pairs]
-            plt.scatter(all_diff, all_conf, alpha=0.5, label="all")
-            front_diff = [r["difficulty"] for r in pareto_front]
-            front_conf = [r["confidence"] for r in pareto_front]
-            plt.plot(front_diff, front_conf, color="red", marker="o", label="Pareto front")
-            plt.xlabel("Difficulty")
-            plt.ylabel("Confidence")
-            plt.title("Difficulty vs Confidence")
-            plt.legend()
-            plt.savefig(out_dir / "difficulty_vs_confidence_pareto.png")
+        plt.legend()
+        plt.savefig(out_dir / "wer_vs_semantic_pareto.png")
 
     print(f"WER: {w:.4f}")
     print(f"SER: {ser:.4f}")
@@ -309,8 +259,6 @@ def main() -> None:
             pred_file,
             out_dir,
             args.tail_fraction,
-            args.confidence_threshold,
-
         )
 
 
