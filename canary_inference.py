@@ -179,11 +179,7 @@ def transcribe_paths(
     batch_size = max(1, int(batch_size))
     import torch, gc
 
-    try:
-        if hasattr(model, "prompt") and hasattr(model.prompt, "update_slots"):
-            model.prompt.update_slots({"pnc": "<|pnc|>" if pnc else "<|nopnc|>"})
-    except Exception:
-        pass
+    # Do not force prompt slots for PnC; rely on model defaults
 
     for i in range(0, len(paths), batch_size):
         batch = paths[i : i + batch_size]
@@ -220,7 +216,49 @@ def transcribe_paths(
                         pass
                     conf = float(score) / float(length)
 
-            results[p] = {"text": text, "confidence": conf}
+            # Extract timestamps when requested and available
+            ts = None
+            if timestamps:
+                ts = {"word": [], "segment": []}
+                # Word-level
+                words = getattr(h, "word_timestamps", None) or getattr(h, "words", None) or getattr(h, "word_ts", None)
+                if words:
+                    for w in words:
+                        if isinstance(w, dict):
+                            st = w.get("start_time", w.get("start", None))
+                            et = w.get("end_time", w.get("end", None))
+                            wd = w.get("word", w.get("text", None))
+                        else:
+                            st = getattr(w, "start_time", getattr(w, "start", None))
+                            et = getattr(w, "end_time", getattr(w, "end", None))
+                            wd = getattr(w, "word", getattr(w, "text", None))
+                        try:
+                            if st is not None and et is not None and wd is not None:
+                                ts["word"].append({"start": float(st), "end": float(et), "word": str(wd)})
+                        except Exception:
+                            continue
+                # Segment-level
+                segs = getattr(h, "segments", None) or getattr(h, "segment_timestamps", None) or getattr(h, "timestamps", None)
+                if segs:
+                    for s in segs:
+                        if isinstance(s, dict):
+                            st = s.get("start", s.get("start_time", None))
+                            et = s.get("end", s.get("end_time", None))
+                            tx = s.get("segment", s.get("text", None))
+                        else:
+                            st = getattr(s, "start", getattr(s, "start_time", None))
+                            et = getattr(s, "end", getattr(s, "end_time", None))
+                            tx = getattr(s, "segment", getattr(s, "text", None))
+                        try:
+                            if st is not None and et is not None and tx is not None:
+                                ts["segment"].append({"start": float(st), "end": float(et), "segment": str(tx)})
+                        except Exception:
+                            continue
+                # Drop empty container
+                if not ts["word"] and not ts["segment"]:
+                    ts = None
+
+            results[p] = {"text": text, "confidence": conf, **({"timestamp": ts} if ts else {})}
         try:
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
