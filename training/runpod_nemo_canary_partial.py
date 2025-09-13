@@ -183,6 +183,49 @@ class TerminalReport(Callback):
         print(" ".join(msg))
 
 
+class EMAWeights(Callback):
+    """Exponential Moving Average of trainable weights with val-time swap."""
+
+    def __init__(self, decay: float = 0.999):
+        super().__init__()
+        self.decay = float(decay)
+        self.shadow = {}
+        self.backup = {}
+
+    def on_fit_start(self, trainer, pl_module):
+        self.shadow = {}
+        for name, p in pl_module.named_parameters():
+            if p.requires_grad and p.data is not None:
+                self.shadow[name] = p.detach().clone()
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        d = self.decay
+        for name, p in pl_module.named_parameters():
+            if not p.requires_grad or p.data is None:
+                continue
+            if name not in self.shadow:
+                self.shadow[name] = p.detach().clone()
+            else:
+                self.shadow[name].mul_(d).add_(p.data, alpha=1.0 - d)
+
+    def _swap_to(self, pl_module, src):
+        for name, p in pl_module.named_parameters():
+            if name in src and p.data is not None:
+                p.data.copy_(src[name])
+
+    def on_validation_start(self, trainer, pl_module):
+        self.backup = {}
+        for name, p in pl_module.named_parameters():
+            if p.data is not None:
+                self.backup[name] = p.detach().clone()
+        self._swap_to(pl_module, self.shadow)
+
+    def on_validation_end(self, trainer, pl_module):
+        if self.backup:
+            self._swap_to(pl_module, self.backup)
+            self.backup.clear()
+
+
 def _flag_present(name: str) -> bool:
     return any(a == name or a.startswith(name + "=") for a in sys.argv[1:])
 
@@ -323,11 +366,22 @@ def main():
     # Optimization & early stop
     ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--weight_decay", type=float, default=None)
-    ap.add_argument("--monitor", default="val_loss")
+    ap.add_argument("--monitor", default="wer")
     ap.add_argument("--early_stop", action="store_true")
     ap.add_argument("--es_patience", type=int, default=3)
     ap.add_argument("--es_min_delta", type=float, default=0.003)
     ap.add_argument("--gradient_clip_val", type=float, default=1.0)
+    # Optimizer param groups and scheduler
+    ap.add_argument("--lr_enc", type=float, default=2e-4)
+    ap.add_argument("--lr_dec", type=float, default=8e-4)
+    ap.add_argument("--lr_head", type=float, default=1.2e-3)
+    ap.add_argument("--eps", type=float, default=1e-8)
+    ap.add_argument("--sched", choices=["cosine", "none"], default="cosine")
+    ap.add_argument("--warmup_steps", type=int, default=1200)
+    ap.add_argument("--min_lr", type=float, default=1e-6)
+    # EMA
+    ap.add_argument("--ema", action="store_true")
+    ap.add_argument("--ema_decay", type=float, default=0.999)
     # Adaptive bucketing and DataLoader tuning
     ap.add_argument("--bucketing", action="store_true", help="Enable duration-based adaptive bucketing")
     ap.add_argument("--bucket_bins", default="2.5,5,10,20,40", help="Comma-separated duration bin edges (sec)")
@@ -352,6 +406,22 @@ def main():
             model.wer.log_prediction = False
         if hasattr(model, 'bleu') and hasattr(model.bleu, 'log_prediction'):
             model.bleu.log_prediction = False
+        # Moderate SpecAugment
+        sa = getattr(model, 'spec_augmentation', None)
+        if sa is not None:
+            for attr, val in (
+                ('freq_masks', 2),
+                ('freq_width', 27),
+                ('time_masks', 8),
+            ):
+                if hasattr(sa, attr):
+                    setattr(sa, attr, val)
+            # time_width may be float fraction or int frames; try safe small value
+            if hasattr(sa, 'time_width'):
+                try:
+                    setattr(sa, 'time_width', 0.05)
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -406,20 +476,55 @@ def main():
             print(f"[LoRA] hybrid injected modules: {replaced} (prefix_fallback={fb})")
             used_hybrid_lora = replaced > 0
 
-    # Best-effort optimizer overrides
+    # Custom optimizer with param groups and cosine+warmup scheduler
+    def _collect_param_groups(m):
+        enc_params, dec_params, head_params = [], [], []
+        for n, p in m.named_parameters():
+            if not p.requires_grad:
+                continue
+            if n.startswith("encoder."):
+                enc_params.append(p)
+            elif n.startswith("transf_decoder."):
+                dec_params.append(p)
+            else:
+                head_params.append(p)
+        return enc_params, dec_params, head_params
+
+    def _configure_optimizers():
+        import torch
+        from torch.optim import AdamW
+        from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
+
+        enc_params, dec_params, head_params = _collect_param_groups(model)
+        param_groups = [
+            {"params": enc_params, "lr": float(args.lr_enc), "weight_decay": float(args.weight_decay), "eps": float(args.eps)},
+            {"params": dec_params, "lr": float(args.lr_dec), "weight_decay": float(args.weight_decay), "eps": float(args.eps)},
+            {"params": head_params, "lr": float(args.lr_head), "weight_decay": float(args.weight_decay), "eps": float(args.eps)},
+        ]
+        opt = AdamW(param_groups, betas=(0.9, 0.999))
+        try:
+            model._optimizer = opt
+        except Exception:
+            pass
+        if args.sched == "cosine":
+            warm = max(0, int(args.warmup_steps))
+            total = max(1, int(args.max_steps))
+            main_steps = max(1, total - warm)
+            # PyTorch LinearLR requires start_factor > 0. Use tiny epsilon to start near-zero.
+            sched1 = LinearLR(opt, start_factor=1e-8, end_factor=1.0, total_iters=max(1, warm)) if warm > 0 else None
+            sched2 = CosineAnnealingLR(opt, T_max=main_steps, eta_min=float(args.min_lr))
+            if sched1 is not None:
+                sched = SequentialLR(opt, schedulers=[sched1, sched2], milestones=[warm])
+            else:
+                sched = sched2
+            return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "step"}}
+        return opt
+
     try:
-        cfg = getattr(model, "cfg", None) or getattr(model, "_cfg", None)
-        if cfg is not None and hasattr(cfg, "optim"):
-            if args.lr is not None and hasattr(cfg.optim, "lr"):
-                old = cfg.optim.lr
-                cfg.optim.lr = args.lr
-                print(f"[OPT] lr: {old} -> {cfg.optim.lr}")
-            if args.weight_decay is not None and hasattr(cfg.optim, "weight_decay"):
-                old = cfg.optim.weight_decay
-                cfg.optim.weight_decay = args.weight_decay
-                print(f"[OPT] weight_decay: {old} -> {cfg.optim.weight_decay}")
+        model.configure_optimizers = _configure_optimizers  # type: ignore
+        print(f"[OPT] AdamW groups enc={args.lr_enc} dec={args.lr_dec} head={args.lr_head} | wd={args.weight_decay} eps={args.eps} sched={args.sched} warmup={args.warmup_steps}")
     except Exception as e:
-        print("[OPT][WARN] cannot override optim cfg:", e)
+        print("[OPT][WARN] could not override configure_optimizers:", e)
 
     # Dataset via Lhotse cuts
     out_dir = Path("data"); out_dir.mkdir(exist_ok=True, parents=True)
@@ -499,18 +604,28 @@ def main():
         save_top_k=-1,
         every_n_train_steps=int(args.save_every),
     )
+    monitor_metric = args.monitor
+    if monitor_metric == "wer":
+        monitor_metric = "val_wer"
+    elif monitor_metric == "bleu":
+        monitor_metric = "val_bleu"
+    elif monitor_metric in ("loss", "val"):
+        monitor_metric = "val_loss"
+
     best_ckpt = ModelCheckpoint(
         dirpath=args.outdir,
         filename="best",
-        save_top_k=1,
-        monitor=args.monitor,
+        save_top_k=3,
+        monitor=monitor_metric,
         mode="min",
     )
     mem_cb = CudaMemReport(every_n_steps=int(args.mem_report_steps))
     term_cb = TerminalReport(every_n_steps=int(args.term_report_steps))
     cbs = [step_ckpt, best_ckpt, mem_cb, term_cb]
+    if getattr(args, "ema", False):
+        cbs.append(EMAWeights(decay=float(getattr(args, "ema_decay", 0.999))))
     if args.early_stop:
-        cbs.append(EarlyStopping(monitor=args.monitor, mode="min", patience=int(args.es_patience), min_delta=float(args.es_min_delta)))
+        cbs.append(EarlyStopping(monitor=monitor_metric, mode="min", patience=int(args.es_patience), min_delta=float(args.es_min_delta)))
     if logger is not None:
         cbs.append(LearningRateMonitor(logging_interval="step"))
 
@@ -568,6 +683,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
 

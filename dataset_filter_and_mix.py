@@ -27,6 +27,22 @@ def resolve_path(p: Path) -> Path:
     return p if p.is_absolute() else (BASE_DIR / p).resolve()
 
 
+def _clean_ref(text: str) -> str:
+    """Remove special artifacts from reference text for manifest writing.
+
+    - Remove backslashes '\\'
+    - Replace double hyphens "--" with a single space
+    - Collapse multiple spaces and strip
+    """
+    if not isinstance(text, str):
+        return ""
+    s = text.replace("\\", " ")
+    s = s.replace("--", " ")
+    # Collapse whitespace
+    s = " ".join(s.split())
+    return s
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Filter datasets and build a mixed training split",
@@ -123,6 +139,7 @@ def save_dataset(df: pd.DataFrame, out_dir: Path) -> None:
 
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = out_dir / "manifest.json"
+    total_duration = 0.0
     with manifest.open("w", encoding="utf-8") as mf:
         for row in df.itertuples(index=False):
             src = Path(row.audio)
@@ -136,13 +153,40 @@ def save_dataset(df: pd.DataFrame, out_dir: Path) -> None:
             except FileNotFoundError:
                 print(f"Warning: missing audio file {src}")
                 continue
+            # Clean reference text for manifest
+            text = _clean_ref(getattr(row, "ref", ""))
             entry = {
                 "audio": str(dest.relative_to(out_dir)),
-                "text": row.ref,
+                "text": text,
                 "dataset": row.dataset,
             }
+            # Accumulate duration if available; otherwise try to infer from file
+            dur = getattr(row, "duration", None)
+            try:
+                if isinstance(dur, (int, float)) and float(dur) > 0:
+                    total_duration += float(dur)
+                else:
+                    try:
+                        import soundfile as sf  # type: ignore
+                        info = sf.info(str(dest))
+                        if info.frames and info.samplerate:
+                            total_duration += float(info.frames) / float(info.samplerate)
+                    except Exception:
+                        try:
+                            import wave, contextlib  # type: ignore
+                            with contextlib.closing(wave.open(str(dest), "rb")) as wf:
+                                fr = wf.getframerate(); nf = wf.getnframes()
+                                if fr and nf:
+                                    total_duration += float(nf) / float(fr)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             mf.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    # Report total duration
+    hours = total_duration / 3600.0
     print(f"Saved manifest and audio files to {out_dir}")
+    print(f"Total duration: {total_duration:.1f} sec ({hours:.2f} h)")
 
 
 def main() -> None:

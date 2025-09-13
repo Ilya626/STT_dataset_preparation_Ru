@@ -5,3 +5,10 @@ predictions
 analysis_output
 __pycache__/
 *.pyc
+fine-tuning-dataset-*
+final_mix.jsonl
+Portable
+sep
+_partial_full.txt
+_slice.bin
+fine-tuning-dataset.zip
