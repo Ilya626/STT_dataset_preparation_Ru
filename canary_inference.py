@@ -7,22 +7,6 @@ from typing import List, TYPE_CHECKING
 
 from tqdm import tqdm
 
-# Ensure OmegaConf is available; install on the fly if missing
-try:  # pragma: no cover - optional dependency
-    from omegaconf import OmegaConf
-except Exception:  # pragma: no cover - install if absent
-    import subprocess, sys
-
-    try:
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "omegaconf"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        from omegaconf import OmegaConf  # type: ignore
-    except Exception:  # pragma: no cover - give up quietly
-        OmegaConf = None
-
 if TYPE_CHECKING:  # pragma: no cover - for type checkers only
     from nemo.collections.asr.models import ASRModel
 
@@ -32,6 +16,8 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # Hardcoded relative location of the Canary model files
 MODEL_PATH = BASE_DIR / ".hf" / "models--nvidia--canary-1b-v2"
+# Pin Canary revision for deterministic downloads
+CANARY_REVISION = "809ebc8cde9905ef510b7f834cb8e4627220f037"
 
 
 def resolve_path(p: Path) -> Path:
@@ -52,13 +38,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-lang", default="ru",
                         help="Target language for inference")
 
-    pnc = parser.add_mutually_exclusive_group()
-    pnc.add_argument("--pnc", dest="pnc", action="store_true",
-                     help="Enable punctuation and casing (default)")
-    pnc.add_argument("--no-pnc", dest="pnc", action="store_false",
-                     help="Disable punctuation and casing")
-    parser.set_defaults(pnc=True)
-
     ts = parser.add_mutually_exclusive_group()
     ts.add_argument("--timestamps", dest="timestamps", action="store_true",
                     help="Return word/segment timestamps if supported")
@@ -74,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def load_canary(model_id: str, model_path: Path = MODEL_PATH):
+def load_canary(model_id: str, model_path: Path = MODEL_PATH, revision: str = CANARY_REVISION):
     """Load a Canary model from various sources.
 
     If ``model_path`` points to a ``.nemo`` file, the model is restored from it.
@@ -98,65 +77,18 @@ def load_canary(model_id: str, model_path: Path = MODEL_PATH):
             model = ASRModel.restore_from(str(nemo_files[0])).eval()
         else:
             model = ASRModel.from_pretrained(
-                model_name=model_id, cache_dir=str(model_path)
+                model_name=model_id,
+                cache_dir=str(model_path),
+                revision=revision,
             ).eval()
     else:
-        model = ASRModel.from_pretrained(model_name=model_id).eval()
-
-    # Enable token-level confidence estimation when possible
-    if OmegaConf is not None:
-        try:  # pragma: no cover - optional nemo/omegaconf dependency
-            cfg = OmegaConf.create({"name": "entropy", "alpha": 0.3})
-            model.change_decoding_strategy(
-                preserve_token_confidence=True, confidence_method_cfg=cfg
-            )
-        except Exception:
-            pass
+        model = ASRModel.from_pretrained(
+            model_name=model_id,
+            cache_dir=str(model_path),
+            revision=revision,
+        ).eval()
 
     return model
-
-
-def _safe_len(tokens) -> int:
-    """Return a safe length for ``tokens`` which may be tensors or sequences."""
-    if tokens is None:
-        return 0
-    try:  # pragma: no cover - optional torch dependency
-        import torch
-
-        if torch.is_tensor(tokens):
-            return tokens.numel()
-    except Exception:  # pragma: no cover - torch not installed
-        pass
-    try:
-        return len(tokens)
-    except Exception:  # pragma: no cover - objects without length
-        return 0
-
-
-def _mean_logprob(token_logprobs):
-    """Compute the mean of log probabilities if possible."""
-    return _safe_mean(token_logprobs)
-
-
-def _safe_mean(values):
-    """Return the mean of ``values`` if possible."""
-    if values is None:
-        return None
-    try:  # pragma: no cover - optional torch dependency
-        import torch
-
-        if torch.is_tensor(values):
-            if values.numel() == 0:
-                return None
-            return float(values.mean().item())
-    except Exception:  # pragma: no cover - torch not installed
-        pass
-    try:
-        if len(values) == 0:
-            return None
-        return float(sum(float(x) for x in values) / len(values))
-    except Exception:  # pragma: no cover - objects without length
-        return None
 
 
 def transcribe_paths(
@@ -165,15 +97,9 @@ def transcribe_paths(
     batch_size: int,
     source_lang: str,
     target_lang: str,
-    pnc: bool,
     timestamps: bool,
 ):
-    """Transcribe ``paths`` and compute a simple confidence score.
-
-    Confidence is estimated from per-token probabilities when available.
-    If the model does not provide them, log probabilities or the overall
-    hypothesis score are used as fallbacks.
-    """
+    """Transcribe ``paths`` and optionally return timestamps."""
 
     results = {}
     batch_size = max(1, int(batch_size))
@@ -196,25 +122,6 @@ def transcribe_paths(
 
         for p, h in zip(batch, hyps):
             text = getattr(h, "text", getattr(h, "pred_text", str(h)))
-
-            conf = None
-            token_conf = getattr(h, "token_confidence", None) or getattr(
-                h, "word_confidence", None
-            )
-            if token_conf:
-                conf = _safe_mean(token_conf)
-            else:
-                score = getattr(h, "score", None)
-                length = getattr(h, "length", None)
-                if score not in (None, 0.0) and isinstance(length, (int, float)) and length > 0:
-                    try:
-                        import torch
-
-                        if torch.is_tensor(score):
-                            score = float(score.detach().item())
-                    except Exception:
-                        pass
-                    conf = float(score) / float(length)
 
             # Extract timestamps when requested and available
             ts = None
@@ -258,7 +165,7 @@ def transcribe_paths(
                 if not ts["word"] and not ts["segment"]:
                     ts = None
 
-            results[p] = {"text": text, "confidence": conf, **({"timestamp": ts} if ts else {})}
+            results[p] = {"text": text, **({"timestamp": ts} if ts else {})}
         try:
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
@@ -269,19 +176,32 @@ def transcribe_paths(
     return results
 
 
+def _estimate_durations(paths):
+    import soundfile as sf
+    durs = []
+    for p in paths:
+        try:
+            with sf.SoundFile(p) as f:
+                durs.append(len(f) / f.samplerate)
+        except Exception:
+            durs.append(0.0)
+    return durs
+
+
 def main() -> None:
     args = parse_args()
     manifest = args.dataset_dir / "manifest.jsonl"
     items = [json.loads(x) for x in manifest.open("r", encoding="utf-8")]
     uniq_paths = list({it["audio_filepath"] for it in items})
     model = load_canary(args.model_id)
+    durs = _estimate_durations(uniq_paths)
+    effective_bs = 1 if any(d > 40.0 for d in durs) else args.batch_size
     preds = transcribe_paths(
         model,
         uniq_paths,
-        args.batch_size,
+        effective_bs,
         args.source_lang,
         args.target_lang,
-        args.pnc,
         args.timestamps,
     )
 
@@ -296,9 +216,6 @@ def main() -> None:
                 "ref": it.get("text", ""),
                 "hyp": hyp,
             }
-            conf = pred.get("confidence")
-            if conf is not None:
-                row["confidence"] = conf
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     print(f"Saved predictions to {out_path}")
