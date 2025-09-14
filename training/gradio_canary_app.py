@@ -77,107 +77,6 @@ def _pick_segment(choice: str, paths: list[str]) -> Optional[str]:
         return None
 
 
-def _split_audio_by_size(
-    path: str,
-    max_chunk_mb: float = 10.0,
-    overlap_sec: float = 1.0,
-    max_chunk_sec: float | None = None,
-) -> tuple[list[str], list[tuple[float, float]]]:
-    """Split ``path`` into chunks with ``overlap_sec`` overlap.
-
-    The chunk duration is derived from the on-disk size (``max_chunk_mb``),
-    but can be further limited by ``max_chunk_sec`` to avoid creating very
-    long segments for highly compressed formats like MP3. Each chunk is
-    converted to mono 16 kHz WAV via ffmpeg to avoid loading the entire file
-    into memory. Returns list of temp paths and their ``(start, end)`` times in
-    seconds.
-    """
-    try:
-        import os, subprocess, json, tempfile
-
-        max_bytes = int(max_chunk_mb * 1024 * 1024)
-
-        # Probe duration via ffprobe
-        probe = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "a:0",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "json",
-                path,
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        dur = float(json.loads(probe.stdout)["format"]["duration"])
-        file_size = os.path.getsize(path)
-
-        # If already small enough, just convert once
-        if file_size <= max_bytes:
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-            tmp.close()
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    path,
-                    "-ac",
-                    "1",
-                    "-ar",
-                    "16000",
-                    tmp.name,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-            return [tmp.name], [(0.0, dur)]
-
-        bytes_per_sec = file_size / max(dur, 0.001)
-        chunk_sec = max_bytes / bytes_per_sec
-        chunk_sec = max(chunk_sec, overlap_sec + 0.1)
-        if max_chunk_sec is not None:
-            chunk_sec = min(chunk_sec, float(max_chunk_sec))
-
-        seg_paths: list[str] = []
-        seg_times: list[tuple[float, float]] = []
-        start = 0.0
-        while start < dur:
-            end = min(dur, start + chunk_sec)
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-            tmp.close()
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-ss",
-                f"{start}",
-                "-i",
-                path,
-                "-t",
-                f"{end - start + overlap_sec}",
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                tmp.name,
-            ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-            seg_paths.append(tmp.name)
-            seg_times.append((start, end))
-            start += chunk_sec - overlap_sec
-
-        return seg_paths, seg_times
-    except Exception:
-        return [path], [(0.0, 0.0)]
-
-
 def _smooth_hysteresis(probs, thr_on=0.6, thr_off=0.4):
     """превращает вероятности в bool-маску с гистерезисом."""
     out = []
@@ -506,7 +405,6 @@ def _ensure_model(nemo_path: str, model_id: str):
 def transcribe_file(
     audio_path: Optional[str],
     chat_state: List[Tuple[str, str]],
-    prev_seg_paths: list[str],
     source_lang: str,
     target_lang: str,
     beam_size: int,
@@ -528,31 +426,20 @@ def transcribe_file(
 ]:
     global _MODEL
     if not audio_path:
-        for p in prev_seg_paths or []:
-            try:
-                Path(p).unlink(missing_ok=True)
-            except Exception:
-                pass
         return chat_state, [], [], gr.update(choices=[], value=None), None, [], None
     if _MODEL is None:
         chat_state = chat_state + [("Error", "Model not loaded")]
-        for p in prev_seg_paths or []:
-            try:
-                Path(p).unlink(missing_ok=True)
-            except Exception:
-                pass
         return chat_state, [], [], gr.update(choices=[], value=None), None, [], None
-    for p in prev_seg_paths or []:
-        try:
-            Path(p).unlink(missing_ok=True)
-        except Exception:
-            pass
-    # Split incoming file into manageable chunks to avoid OOM
-    seg_paths, seg_times = _split_audio_by_size(
-        audio_path,
-        max_chunk_mb=10.0,
-        overlap_sec=1.0,
-        max_chunk_sec=60.0,
+    # Ensure mono 16 kHz WAV to avoid MultiCut errors on stereo inputs
+    prep_path = _ensure_mono_16k(audio_path)
+    # Generate large speech blocks with VAD gating
+    seg_paths, seg_times = _speech_blocks_16k(
+        prep_path,
+        vad_backend=(vad_backend or "silero"),
+        min_silence=float(min_silence or 1.8),
+        min_speech=float(min_speech or 0.8),
+        pad=float(pad or 0.25),
+        max_block_sec=float(max_block_sec or 240.0),
     )
 
     # Decoding: greedy by default; bump beam only if >1
@@ -656,12 +543,7 @@ def transcribe_file(
     return chat_state, ds_update, df_rows, dd_update, first_audio, seg_paths, None, merged_df_rows
 
 
-def reset_inputs(prev_seg_paths: list[str]) -> Tuple[None, List[Tuple[str, str]], object, list[list[object]], object, None, list[str], list[list[object]]]:
-    for p in prev_seg_paths or []:
-        try:
-            Path(p).unlink(missing_ok=True)
-        except Exception:
-            pass
+def reset_inputs() -> Tuple[None, List[Tuple[str, str]], object, list[list[object]], object, None, list[str], list[list[object]]]:
     try:
         empty_ds = gr.update(samples=[])
     except Exception:
@@ -770,17 +652,13 @@ def main():
         seg_paths_state = gr.State([])
 
         trans_btn.click(
-            fn=lambda a, s, prev, sl, tl, bm, vb, msil, msp, pd, mblk, ddw: transcribe_file(
-                a, s, prev, sl, tl, int(bm), vb, float(msil), float(msp), float(pd), float(mblk), float(ddw)
+            fn=lambda a, s, sl, tl, bm, vb, msil, msp, pd, mblk, ddw: transcribe_file(
+                a, s, sl, tl, int(bm), vb, float(msil), float(msp), float(pd), float(mblk), float(ddw)
             ),
-            inputs=[audio, state, seg_paths_state, src, tgt, beam, vad_backend, min_sil, min_sp, pad_s, max_blk, dedup],
+            inputs=[audio, state, src, tgt, beam, vad_backend, min_sil, min_sp, pad_s, max_blk, dedup],
             outputs=[chat, segments_ds, seg_df, seg_pick, seg_player, seg_paths_state, audio, merged_df],
         )
-        reset_btn.click(
-            fn=reset_inputs,
-            inputs=[seg_paths_state],
-            outputs=[audio, chat, segments_ds, seg_df, seg_pick, seg_player, seg_paths_state, merged_df],
-        )
+        reset_btn.click(fn=reset_inputs, inputs=None, outputs=[audio, chat, segments_ds, seg_df, seg_pick, seg_player, seg_paths_state, merged_df])
 
         seg_pick.change(
             fn=lambda choice, paths: _pick_segment(choice, paths),
