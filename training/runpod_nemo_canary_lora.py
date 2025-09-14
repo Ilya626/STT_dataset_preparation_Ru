@@ -4,6 +4,8 @@ Runpod/Linux launcher for native NeMo LoRA fine-tuning of Canary.
 
 Goals (per guide):
 - Use NeMo native adapter (LoRA) instead of custom layer wrapping.
+- Attach adapters only to attention/MLP projections of the top encoder/decoder layers
+  (linear_qkv, linear_proj, linear_fc1, linear_fc2).
 - Keep changes minimal and explicit; rely on NeMo APIs.
 
 Requirements on the machine (e.g., Runpod A6000 48GB):
@@ -18,7 +20,8 @@ Example:
     --val /workspace/data/val.jsonl \
     --outdir /workspace/exp/canary_ru_lora_a6000 \
     --export /workspace/models/canary-ru-lora-a6000.nemo \
-    --bs 8 --accum 1 --precision bf16 --lora_r 16 --lora_alpha 32 --lora_dropout 0.05
+      --bs 8 --accum 1 --precision bf16 --lora_r 16 --lora_alpha 32 --lora_dropout 0.05 \
+      --enc_lora_layers 6 --dec_lora_layers 2
 
 Notes:
 - If your NeMo build lacks native adapter support, this script will raise with setup tips.
@@ -29,6 +32,7 @@ from pathlib import Path
 import sys
 import os
 import shutil
+import re
 
 import torch
 from lightning.pytorch import Trainer, seed_everything
@@ -225,6 +229,8 @@ def main():
     ap.add_argument("--lora_r", type=int, default=16)
     ap.add_argument("--lora_alpha", type=int, default=32)
     ap.add_argument("--lora_dropout", type=float, default=0.05)
+    ap.add_argument("--enc_lora_layers", type=int, default=6, help="Number of top encoder layers to adapt")
+    ap.add_argument("--dec_lora_layers", type=int, default=2, help="Number of top decoder layers to adapt")
     ap.add_argument("--bs", type=int, default=8)
     ap.add_argument("--accum", type=int, default=1)
     ap.add_argument("--precision", default="bf16")
@@ -381,6 +387,33 @@ def main():
     except Exception as e:
         print(f"[OPT][WARN] Could not override optimizer cfg: {e}")
 
+    # Determine target module names for LoRA based on top-N layers
+    mods = ("linear_qkv", "linear_proj", "linear_fc1", "linear_fc2")
+    enc_ids = set()
+    dec_ids = set()
+    for n, _ in model.named_modules():
+        m = re.search(r"encoder.*?(\d+)", n)
+        if m:
+            enc_ids.add(int(m.group(1)))
+        m = re.search(r"transf_decoder.*?(\d+)", n)
+        if m:
+            dec_ids.add(int(m.group(1)))
+    num_enc = max(enc_ids) + 1 if enc_ids else 0
+    num_dec = max(dec_ids) + 1 if dec_ids else 0
+    enc_start = max(0, num_enc - int(args.enc_lora_layers))
+    dec_start = max(0, num_dec - int(args.dec_lora_layers))
+    enabled_modules = []
+    for n, _ in model.named_modules():
+        if n.endswith(mods):
+            m = re.search(r"encoder.*?(\d+)", n)
+            if m and int(m.group(1)) >= enc_start:
+                enabled_modules.append(n)
+                continue
+            m = re.search(r"transf_decoder.*?(\d+)", n)
+            if m and int(m.group(1)) >= dec_start:
+                enabled_modules.append(n)
+    print(f"[ADAPTER] LoRA target modules: {len(enabled_modules)} (enc_last={args.enc_lora_layers} dec_last={args.dec_lora_layers})")
+
     # Prepare LoRA config (try native class first, fallback to Hydra-style dict)
     lora_cfg = None
     try:
@@ -388,7 +421,7 @@ def main():
         from nemo.core.adapters.lora import LoRAConfig as _LoRAConfig  # type: ignore
         lora_cfg = _LoRAConfig(
             r=int(args.lora_r), alpha=int(args.lora_alpha), dropout=float(args.lora_dropout),
-            enabled_modules=["encoder.*", "transf_decoder.*"],
+            enabled_modules=enabled_modules,
         )
     except Exception:
         try:
@@ -396,7 +429,7 @@ def main():
             from nemo.core.adapters import LoRAConfig as _LoRAConfig  # type: ignore
             lora_cfg = _LoRAConfig(
                 r=int(args.lora_r), alpha=int(args.lora_alpha), dropout=float(args.lora_dropout),
-                enabled_modules=["encoder.*", "transf_decoder.*"],
+                enabled_modules=enabled_modules,
             )
         except Exception:
             # Last resort: Hydra dict (works if add_adapter hydrates cfg)
@@ -405,7 +438,7 @@ def main():
                 "r": int(args.lora_r),
                 "alpha": int(args.lora_alpha),
                 "dropout": float(args.lora_dropout),
-                "enabled_modules": ["encoder.*", "transf_decoder.*"],
+                "enabled_modules": enabled_modules,
             }
 
     used_adapter = False
@@ -451,29 +484,14 @@ def main():
         # Freeze base weights; LoRA layers hold trainable params
         for p in model.parameters():
             p.requires_grad = False
-        patterns = [
-            r"(self_)?attn\.(q_proj|k_proj|v_proj|out_proj)",
-            r"linear_qkv",
-            r"linear_proj",
-            r"linear_fc1",
-            r"linear_fc2",
-            r"\bfc1\b",
-            r"\bfc2\b",
-            r"linear1",
-            r"linear2",
-            r"\bproj\b",
-            r"to_q\b",
-            r"to_k\b",
-            r"to_v\b",
-            r"to_out\b",
-        ]
+        patterns = [re.escape(n) + "$" for n in enabled_modules]
         replaced, used_fb = inject_lora_modules(
             model,
             patterns,
             r=int(args.lora_r),
             alpha=int(args.lora_alpha),
             dropout=float(args.lora_dropout),
-            fallback_prefixes=("encoder", "transf_decoder"),
+            fallback_prefixes=(),
             debug_print=0,
         )
         print(f"[FALLBACK] LoRA injected modules: {replaced} (prefix_fallback={used_fb})")
@@ -539,7 +557,7 @@ def main():
     # Here we mimic the same behavior by calling them with extended config that includes input_manifest.
     def _ensure_cuts(path_jsonl, out_path):
         try:
-    from training.finetune_canary import build_cuts_from_jsonl  # reuse helper
+            from training.finetune_canary import build_cuts_from_jsonl  # reuse helper
             cuts, _ = build_cuts_from_jsonl(path_jsonl)
             Path(out_path).parent.mkdir(parents=True, exist_ok=True)
             cuts.to_file(out_path)
