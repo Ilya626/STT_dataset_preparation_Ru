@@ -81,12 +81,16 @@ def _split_audio_by_size(
     path: str,
     max_chunk_mb: float = 10.0,
     overlap_sec: float = 1.0,
+    max_chunk_sec: float | None = None,
 ) -> tuple[list[str], list[tuple[float, float]]]:
-    """Split ``path`` into ~max_chunk_mb chunks with ``overlap_sec`` overlap.
+    """Split ``path`` into chunks with ``overlap_sec`` overlap.
 
-    Each chunk is converted to mono 16 kHz WAV via ffmpeg to avoid loading the
-    entire file into memory. Returns list of temp paths and their (start, end)
-    times in seconds.
+    The chunk duration is derived from the on-disk size (``max_chunk_mb``),
+    but can be further limited by ``max_chunk_sec`` to avoid creating very
+    long segments for highly compressed formats like MP3. Each chunk is
+    converted to mono 16 kHz WAV via ffmpeg to avoid loading the entire file
+    into memory. Returns list of temp paths and their ``(start, end)`` times in
+    seconds.
     """
     try:
         import os, subprocess, json, tempfile
@@ -139,6 +143,8 @@ def _split_audio_by_size(
         bytes_per_sec = file_size / max(dur, 0.001)
         chunk_sec = max_bytes / bytes_per_sec
         chunk_sec = max(chunk_sec, overlap_sec + 0.1)
+        if max_chunk_sec is not None:
+            chunk_sec = min(chunk_sec, float(max_chunk_sec))
 
         seg_paths: list[str] = []
         seg_times: list[tuple[float, float]] = []
@@ -546,6 +552,7 @@ def transcribe_file(
         audio_path,
         max_chunk_mb=10.0,
         overlap_sec=1.0,
+        max_chunk_sec=60.0,
     )
 
     # Decoding: greedy by default; bump beam only if >1
