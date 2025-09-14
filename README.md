@@ -48,14 +48,60 @@ Example:
 python canary_inference.py --dataset-dir data_wav --out-dir predictions
 ```
 
+### Options
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--model-id MODEL_ID` | HuggingFace model identifier | `nvidia/canary-1b-v2` |
+| `--source-lang LANG` | Source language code | `ru` |
+| `--target-lang LANG` | Target language code | `ru` |
+| `--batch-size N` | Transcription batch size (auto-reduced to 1 for clips >40 s) | `32` |
+| `--timestamps` | Return word/segment timestamps | `False` |
+
 The model cache is expected under `.hf/models--nvidia--canary-1b-v2`
 relative to the script. To use a different Hugging Face cache or `.nemo`
 file, edit the `MODEL_PATH` constant in `canary_inference.py`.
 
-Use `--help` to see all available options. The script loads the Canary model and
+### Example
+
+Run with timestamps and smaller batches:
+
+```bash
+python canary_inference.py --dataset-dir data_wav --out-dir predictions \
+    --batch-size 8 --timestamps
+```
+
+Use `--help` to see all available flags. The script loads the Canary model and
 writes predictions vs reference text for each audio file.
 
-## 3. Analyse predictions
+## 3. Launch Gradio Canary demo
+`training/gradio_canary_app.py` provides a lightweight Gradio interface for
+ad-hoc transcription. It performs VAD gating and can fall back to MarbleNet
+probabilities for noisy inputs.
+
+### Options
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `--nemo PATH` | Path to base `.nemo` model (preferred) | – |
+| `--model_id MODEL_ID` | HF model id if no `.nemo` is given | `nvidia/canary-1b-v2` |
+| `--source_lang LANG` | Source language code | `ru` |
+| `--target_lang LANG` | Target language code | `ru` |
+| `--vad_backend NAME` | VAD backend: `silero`, `marblenet`, `none` | `silero` |
+| `--max_block_sec SEC` | Hard cap for block length | `240.0` |
+| `--dedup_window SEC` | Seam deduplication window | `0.8` |
+
+Set the `CANARY_REVISION` environment variable to pin a specific model commit
+when downloading from Hugging Face.
+
+### Example
+
+```bash
+python training/gradio_canary_app.py --nemo path/to/canary.nemo \
+    --source_lang ru --target_lang ru --vad_backend marblenet
+```
+
+## 4. Analyse predictions
 `dataset_analysis.py` resolves paths relative to the script directory and scans
 the `predictions/` folder for subdirectories. Each subfolder is expected to
 contain a `preds.jsonl` file with model outputs. For every dataset folder the
@@ -88,7 +134,7 @@ installed via pip:
 pip install sentence-transformers matplotlib
 ```
 
-## 4. Filter and mix datasets
+## 5. Filter and mix datasets
 After analysing individual datasets you can build a combined training split
 that emphasises difficult examples while keeping some easy ones for balance.
 

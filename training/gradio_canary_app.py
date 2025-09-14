@@ -77,13 +77,27 @@ def _pick_segment(choice: str, paths: list[str]) -> Optional[str]:
         return None
 
 
+def _smooth_hysteresis(probs, thr_on=0.6, thr_off=0.4):
+    """превращает вероятности в bool-маску с гистерезисом."""
+    out = []
+    state = False
+    for p in probs:
+        if not state and p >= thr_on:
+            state = True
+        elif state and p <= thr_off:
+            state = False
+        out.append(state)
+    import numpy as np
+    return np.array(out, dtype=bool)
+
+
 def _speech_blocks_16k(
     path: str,
     vad_backend: str = "silero",  # "none" | "silero" | "marblenet"
     min_silence: float = 1.8,
     min_speech: float = 0.8,
     pad: float = 0.25,
-    max_block_sec: float = 60.0,
+    max_block_sec: float = 240.0,
 ) -> Tuple[list[str], list[Tuple[float, float]]]:
     """Detect large non-speech and return padded speech blocks.
 
@@ -138,20 +152,32 @@ def _speech_blocks_16k(
         # Try MarbleNet VAD from NeMo if requested and silero not used
         if used_backend == "none" and backend in ("marblenet", "auto"):
             try:
-                # Lightweight frame-based VAD using NeMo pre-trained model
-                from nemo.collections.asr.models import EncDecClassificationModel  # type: ignore
+                from nemo.collections.asr.models import EncDecFrameClassificationModel
                 import torch
 
-                vad_model = EncDecClassificationModel.from_pretrained("vad_marblenet").eval()
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                vad_model = EncDecFrameClassificationModel.from_pretrained(
+                    model_name="vad_multilingual_frame_marblenet"
+                ).to(device).eval()
                 with torch.no_grad():
-                    # Compute frame probs using model helper if available
-                    # Fallback: mark all as speech (will be refined by energy)
-                    probs = None
-                # If we somehow got probs, threshold into speech_mask here
-                if probs is not None:
-                    thr = 0.5
-                    speech_mask[:] = (probs > thr)
-                    used_backend = "marblenet"
+                    sig = torch.tensor(y, dtype=torch.float32, device=device).unsqueeze(0)
+                    probs = (
+                        vad_model.get_frame_probs(signal=sig)
+                        .squeeze(0)
+                        .detach()
+                        .cpu()
+                        .numpy()
+                    )
+                ratio = int(round(30 / 20))
+                if ratio > 1:
+                    probs = np.maximum.reduce([probs[i::ratio] for i in range(ratio)])
+                speech_mask = _smooth_hysteresis(
+                    probs,
+                    thr_on=max(0.0, min(1.0, 0.6)),
+                    thr_off=max(0.0, min(1.0, 0.4)),
+                )
+                n_frames = len(speech_mask)
+                used_backend = "marblenet"
             except Exception:
                 pass
 
@@ -246,7 +272,7 @@ def _speech_blocks_16k(
         return [path], [(0.0, 0.0)]
 
 
-def merge_by_timestamps(seg_paths: list[str], res: dict, dedup_window: float = 0.3):
+def merge_by_timestamps(seg_paths: list[str], res: dict, dedup_window: float = 0.8):
     """Merge Canary segments across blocks by time with simple dedup on seams."""
     merged = []
     last_end = 0.0
@@ -299,6 +325,51 @@ def merge_by_timestamps(seg_paths: list[str], res: dict, dedup_window: float = 0
     return " ".join(t for t in texts if t), merged
 
 
+# Two-pass decoding helpers
+def _needs_redo(txt: str, dur: float, lang: str = "ru") -> bool:
+    t = (txt or "").strip()
+    if dur > 8.0 and len(t) < 10:
+        return True
+    if "�" in t or "⁇" in t or "??" in t or ("…" in t and len(t) < 5):
+        return True
+    import re
+    if lang == "ru":
+        cyr = len(re.findall(r"[А-Яа-яЁё]", t))
+        if cyr < 0.6 * max(1, len(t)):
+            return True
+    if re.search(r"\b(\w+)\b(?:\s+\1\b){2,}", t, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _set_beam(model, beam_size=6):
+    from copy import deepcopy
+
+    dec = getattr(model, "cfg", None)
+    if dec and hasattr(dec, "decoding"):
+        dc = deepcopy(dec.decoding)
+        if hasattr(dc, "strategy"):
+            dc.strategy = "beam"
+        if hasattr(dc, "beam"):
+            dc.beam.beam_size = int(beam_size)
+        if hasattr(dc, "beam_size"):
+            dc.beam_size = int(beam_size)
+        if hasattr(model, "change_decoding_strategy"):
+            model.change_decoding_strategy(dc)
+
+
+def _set_greedy(model):
+    from copy import deepcopy
+
+    dec = getattr(model, "cfg", None)
+    if dec and hasattr(dec, "decoding"):
+        dc = deepcopy(dec.decoding)
+        if hasattr(dc, "strategy"):
+            dc.strategy = "greedy"
+        if hasattr(model, "change_decoding_strategy"):
+            model.change_decoding_strategy(dc)
+
+
 # Global model holder to avoid deepcopy/pickle issues in gr.State
 _MODEL = None
 
@@ -311,17 +382,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=7860)
     ap.add_argument("--share", action="store_true")
-    ap.add_argument("--batch_size", type=int, default=1)
     ap.add_argument("--source_lang", default="ru")
     ap.add_argument("--target_lang", default="ru")
-    ap.add_argument("--pnc", action="store_true", help="Enable punctuation+case by default")
     # VAD / long-form controls
     ap.add_argument("--vad_backend", default="silero", choices=["silero", "marblenet", "none"], help="VAD backend for gating")
     ap.add_argument("--min_silence", type=float, default=1.8, help="Long silence threshold (s)")
     ap.add_argument("--min_speech", type=float, default=0.8, help="Minimal speech block length (s)")
     ap.add_argument("--pad", type=float, default=0.25, help="Padding around speech blocks (s)")
-    ap.add_argument("--max_block_sec", type=float, default=60.0, help="Hard cap block length (s)")
-    ap.add_argument("--dedup_window", type=float, default=0.3, help="Seam dedup window (s)")
+    ap.add_argument("--max_block_sec", type=float, default=240.0, help="Hard cap block length (s)")
+    ap.add_argument("--dedup_window", type=float, default=0.8, help="Seam dedup window (s)")
     return ap
 
 
@@ -336,10 +405,8 @@ def _ensure_model(nemo_path: str, model_id: str):
 def transcribe_file(
     audio_path: Optional[str],
     chat_state: List[Tuple[str, str]],
-    batch_size: int,
     source_lang: str,
     target_lang: str,
-    pnc_flag: bool,
     beam_size: int,
     vad_backend: str,
     min_silence: float,
@@ -372,7 +439,7 @@ def transcribe_file(
         min_silence=float(min_silence or 1.8),
         min_speech=float(min_speech or 0.8),
         pad=float(pad or 0.25),
-        max_block_sec=float(max_block_sec or 60.0),
+        max_block_sec=float(max_block_sec or 240.0),
     )
 
     # Decoding: greedy by default; bump beam only if >1
@@ -391,21 +458,41 @@ def transcribe_file(
         except Exception:
             pass
 
-    # PnC enabled; request timestamps for robust stitching; keep batch_size=1 inside file
+    # PnC is always enabled; request timestamps for robust stitching; keep batch_size=1 inside file
     res = transcribe_paths(
         _MODEL,
         seg_paths,
         batch_size=1,
         source_lang=source_lang,
         target_lang=target_lang,
-        pnc=True,
         timestamps=True,
     )
+    # Собираем к кандидаты на редекод
+    redo = []
+    for (p, (st, et)) in zip(seg_paths, seg_times):
+        txt = (res.get(p, {}) or {}).get("text", "")
+        if _needs_redo(txt, dur=et - st, lang=source_lang):
+            redo.append(p)
+
+    if redo:
+        try:
+            _set_beam(_MODEL, beam_size=6)
+            res2 = transcribe_paths(
+                _MODEL,
+                redo,
+                batch_size=1,
+                source_lang=source_lang,
+                target_lang=target_lang,
+                timestamps=True,
+            )
+            res.update(res2)
+        finally:
+            _set_greedy(_MODEL)
     # Merge by timestamps to drop seam duplicates
-    full, merged_segments = merge_by_timestamps(seg_paths, res, dedup_window=float(dedup_window or 0.3))
+    full, merged_segments = merge_by_timestamps(seg_paths, res, dedup_window=float(dedup_window or 0.8))
     full = _clean_text_ru(full)
     chat_state = chat_state + [(f"Audio: {Path(audio_path).name}", full)]
-    # Build dataset rows with audio + timing + transcript (+ confidence)
+    # Build dataset rows with audio + timing + transcript
     dataset_rows: list[list[object]] = []
     for idx, (p, (st, et)) in enumerate(zip(seg_paths, seg_times), start=1):
         pred = res.get(p, {})
@@ -415,7 +502,6 @@ def transcribe_file(
             p,
             f"{st:.2f}-{et:.2f}s",
             pred_text,
-            None if pred.get("confidence") is None else float(pred.get("confidence")),
         ])
     # Return dataset update so Gradio refreshes the Dataset.samples
     try:
@@ -442,7 +528,6 @@ def transcribe_file(
             round(st, 2),
             round(et, 2),
             _clean_text_ru(pred.get("text", "")),
-            None if pred.get("confidence") is None else float(pred.get("confidence")),
             cspan,
         ])
         choices.append(f"{idx}: {st:.2f}-{et:.2f}s")
@@ -516,10 +601,9 @@ def main():
                 model_toggle = gr.Slider(0, 1, value=0, step=1, label="Model selector (0=BASE, 1=ALT)")
                 status = gr.Markdown(value=f"Loaded [BASE] {Path(args.nemo).name if args.nemo else args.model_id}")
                 # PnC is always enabled; keep a disabled checkbox for clarity
-                pnc = gr.Checkbox(value=True, label="Punctuation + Casing (PnC)", interactive=False)
+                _pnc_display = gr.Checkbox(value=True, label="Punctuation + Casing (PnC)", interactive=False)
                 src = gr.Textbox(value=args.source_lang, label="Source lang", interactive=True)
                 tgt = gr.Textbox(value=args.target_lang, label="Target lang", interactive=True)
-                bs = gr.Number(value=args.batch_size, precision=0, label="Batch size", interactive=True)
                 beam = gr.Slider(minimum=1, maximum=10, value=1, step=1, label="Beam size")
 
                 gr.Markdown("### VAD + Long-form settings")
@@ -540,9 +624,8 @@ def main():
                         gr.Audio(type="filepath"),
                         gr.Textbox(label="Время", interactive=False),
                         gr.Textbox(label="Текст", lines=2),
-                        gr.Number(label="Conf", precision=3),
                     ],
-                    headers=["Аудио", "Время", "Транскрипт", "Conf"],
+                    headers=["Аудио", "Время", "Транскрипт"],
                     label="Нажмите play на нужном сегменте",
                     samples=[],
                     type="values",
@@ -551,8 +634,8 @@ def main():
                 seg_player = gr.Audio(label="Segment", type="filepath")
                 seg_pick = gr.Dropdown(label="Segment", choices=[], value=None)
                 seg_df = gr.Dataframe(
-                    headers=["idx", "start_s", "end_s", "text", "confidence", "canary_span"],
-                    datatype=["number", "number", "number", "str", "number", "str"],
+                    headers=["idx", "start_s", "end_s", "text", "canary_span"],
+                    datatype=["number", "number", "number", "str", "str"],
                     interactive=False,
                     label="Per-VAD-block transcripts (+ Canary span)",
                 )
@@ -569,8 +652,10 @@ def main():
         seg_paths_state = gr.State([])
 
         trans_btn.click(
-            fn=lambda a, s, b, sl, tl, pn, bm, vb, msil, msp, pd, mblk, ddw: transcribe_file(a, s, int(b), sl, tl, pn, int(bm), vb, float(msil), float(msp), float(pd), float(mblk), float(ddw)),
-            inputs=[audio, state, bs, src, tgt, pnc, beam, vad_backend, min_sil, min_sp, pad_s, max_blk, dedup],
+            fn=lambda a, s, sl, tl, bm, vb, msil, msp, pd, mblk, ddw: transcribe_file(
+                a, s, sl, tl, int(bm), vb, float(msil), float(msp), float(pd), float(mblk), float(ddw)
+            ),
+            inputs=[audio, state, src, tgt, beam, vad_backend, min_sil, min_sp, pad_s, max_blk, dedup],
             outputs=[chat, segments_ds, seg_df, seg_pick, seg_player, seg_paths_state, audio, merged_df],
         )
         reset_btn.click(fn=reset_inputs, inputs=None, outputs=[audio, chat, segments_ds, seg_df, seg_pick, seg_player, seg_paths_state, merged_df])
