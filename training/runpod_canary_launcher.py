@@ -216,6 +216,9 @@ def main():
     ap.add_argument("--lora_r", type=int, default=16)
     ap.add_argument("--lora_alpha", type=int, default=32)
     ap.add_argument("--lora_dropout", type=float, default=0.05)
+    ap.add_argument("--enc_lora_layers", type=int, default=6, help="Number of top encoder layers to adapt")
+    ap.add_argument("--dec_lora_layers", type=int, default=2, help="Number of top decoder layers to adapt")
+    ap.add_argument("--adapter_name", default="ru_lora", help="LoRA adapter name")
 
     # Partial-specific overrides (optional)
     ap.add_argument("--unfreeze_encoder_last", type=int, default=4)
@@ -289,6 +292,9 @@ def main():
             "--lora_r", str(args.lora_r),
             "--lora_alpha", str(args.lora_alpha),
             "--lora_dropout", str(args.lora_dropout),
+            "--enc_lora_layers", str(args.enc_lora_layers),
+            "--dec_lora_layers", str(args.dec_lora_layers),
+            "--adapter_name", args.adapter_name,
         ]
     else:  # partial
         cmd = [
