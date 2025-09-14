@@ -13,3 +13,4 @@ _partial_full.txt
 _slice.bin
 fine-tuning-dataset.zip
 models
+/.tmp_canary_asr/
